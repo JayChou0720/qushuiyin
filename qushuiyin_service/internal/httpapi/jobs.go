@@ -36,6 +36,7 @@ type historySource struct {
 type asset struct {
 	ID, Kind, Role string
 	Order          int
+	Version        int64
 }
 type result struct {
 	ID, User             string
@@ -208,10 +209,10 @@ func (s *Mock) runJob(ctx context.Context, j *job, selected, cacheKey string, fo
 	}
 	res := &result{ID: auth.ID(), User: j.User, Value: parsed, CreatedAt: time.Now().UTC(), ExpiresAt: j.Expires}
 	for _, x := range parsed.Assets {
-		res.Assets = append(res.Assets, asset{auth.ID(), x.Kind, x.Role, x.Order})
+		res.Assets = append(res.Assets, asset{ID: auth.ID(), Kind: x.Kind, Role: x.Role, Order: x.Order})
 	}
 	if x := parsed.Cover; x != nil {
-		res.Cover = &asset{auth.ID(), x.Kind, x.Role, x.Order}
+		res.Cover = &asset{ID: auth.ID(), Kind: x.Kind, Role: x.Role, Order: x.Order}
 	}
 	s.results[res.ID] = res
 	j.Status, j.ResultID = "SUCCEEDED", res.ID

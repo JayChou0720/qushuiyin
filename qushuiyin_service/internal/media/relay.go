@@ -50,25 +50,41 @@ type Relay struct {
 	imageSlots         chan struct{}
 }
 
-// Only this module chooses paths. Storage keys and source candidates never
-// originate in download requests. Each caller is a bounded media worker.
-func (r *Relay) Prepare(ctx context.Context, platform, contentID, version string, a parse.Asset) (Prepared, error) {
-	return r.prepare(ctx, platform, contentID, version, a, false)
+type FileIdentity struct {
+	Platform, ContentID       string
+	UserID, ResultID, AssetID string
+	AssetVersion              int64
 }
 
-func (r *Relay) PrepareThumbnail(ctx context.Context, platform, contentID string, a parse.Asset) (Prepared, error) {
+func (r *Relay) shareKey(id FileIdentity, version string, a parse.Asset) string {
+	if id.ContentID != "" {
+		return auth.Digest(r.Key, id.Platform+":"+id.ContentID+":"+a.Role+":"+strconv.Itoa(a.Order)+":"+version)
+	}
+	parts := []string{id.UserID, id.ResultID, id.AssetID, strconv.FormatInt(id.AssetVersion, 10), version}
+	raw, _ := json.Marshal(parts)
+	return auth.Digest(r.Key, "private-media:"+string(raw))
+}
+
+// Only this module chooses paths. The identity comes from the authorized result.
+func (r *Relay) Prepare(ctx context.Context, id FileIdentity, version string, a parse.Asset) (Prepared, error) {
+	return r.prepare(ctx, id, version, a, false)
+}
+
+func (r *Relay) PrepareThumbnail(ctx context.Context, id FileIdentity, version string, a parse.Asset) (Prepared, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.Settings.Seconds("thumbnail_generate_timeout_seconds"))
 	defer cancel()
-	return r.prepare(ctx, platform, contentID, "thumb-"+strconv.FormatInt(r.Settings.Int("thumbnail_max_edge_px"), 10), a, true)
+	edge := strconv.FormatInt(r.Settings.Int("thumbnail_max_edge_px"), 10)
+	quality := strconv.FormatInt(r.Settings.Int("thumbnail_jpeg_quality"), 10)
+	return r.prepare(ctx, id, "thumb-"+edge+"-"+quality+"-"+version, a, true)
 }
 
-func (r *Relay) prepare(ctx context.Context, platform, contentID, version string, a parse.Asset, thumbnail bool) (Prepared, error) {
+func (r *Relay) prepare(ctx context.Context, id FileIdentity, version string, a parse.Asset, thumbnail bool) (Prepared, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.Settings.Seconds("media_fetch_timeout_seconds"))
 	defer cancel()
-	share := auth.Digest(r.Key, platform+":"+contentID+":"+a.Role+":"+strconv.Itoa(a.Order)+":"+version)
-	if contentID == "" {
-		share = auth.ID()
+	if id.ContentID == "" && (id.UserID == "" || id.ResultID == "" || id.AssetID == "") {
+		return Prepared{}, errors.New("missing private media identity")
 	}
+	share := r.shareKey(id, version, a)
 	for {
 		r.mu.Lock()
 		if r.pending == nil {

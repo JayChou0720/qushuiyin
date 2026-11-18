@@ -39,7 +39,7 @@ func (s *Mock) livePreviewTickets(w http.ResponseWriter, r *http.Request, c cred
 	}
 	seen := map[string]bool{}
 	for _, id := range req.AssetIDs {
-		a := sourceAsset(res.result, id)
+		a, _ := sourceAsset(res.result, id)
 		if a == nil || seen[id] || a.Kind == "video" && len(req.AssetIDs) != 1 {
 			fail(w, 400, "BAD_REQUEST")
 			return
@@ -55,7 +55,7 @@ func (s *Mock) livePreviewTickets(w http.ResponseWriter, r *http.Request, c cred
 	}
 	entries := make([]dto, 0, len(req.AssetIDs))
 	for _, aid := range req.AssetIDs {
-		a := sourceAsset(res.result, aid)
+		a, version := sourceAsset(res.result, aid)
 		entry := dto{"assetId": aid, "mode": "relay", "url": nil, "expiresAt": nil}
 		policy, e := s.deliveryPolicy(r.Context(), res.result, asset{ID: aid, Kind: a.Kind, Role: a.Role, Order: a.Order})
 		if e != nil || policy == "copy_only" {
@@ -76,12 +76,6 @@ func (s *Mock) livePreviewTickets(w http.ResponseWriter, r *http.Request, c cred
 				entries = append(entries, entry)
 				continue
 			}
-		}
-		var version int64
-		if e = s.Sessions.DB.QueryRowContext(r.Context(), "SELECT version FROM media_asset WHERE id=? AND user_id=? AND result_id=?", aid, c.User, res.ID).Scan(&version); e != nil {
-			entry["reasonCode"] = "SERVICE_BUSY"
-			entries = append(entries, entry)
-			continue
 		}
 		id := auth.ID()
 		p := &preview{user: c.User, session: c.Digest, resultID: res.ID, kind: a.Kind, assetID: aid, version: version, expires: expires}
@@ -164,12 +158,11 @@ func (s *Mock) livePreviewMedia(w http.ResponseWriter, r *http.Request, purpose 
 		fail(w, 410, "RESULT_EXPIRED")
 		return
 	}
-	var version int64
-	if e = s.Sessions.DB.QueryRowContext(r.Context(), "SELECT version FROM media_asset WHERE id=? AND user_id=? AND result_id=?", aid, p.user, p.resultID).Scan(&version); e != nil || version != p.version {
+	a, version := sourceAsset(res.result, aid)
+	if version != p.version {
 		fail(w, 403, "ACCESS_DENIED")
 		return
 	}
-	a := sourceAsset(res.result, aid)
 	if a == nil {
 		fail(w, 404, "RESOURCE_NOT_FOUND")
 		return
@@ -225,16 +218,13 @@ func (s *Mock) livePreviewMedia(w http.ResponseWriter, r *http.Request, purpose 
 		}
 		return
 	}
-	contentID := ""
-	if res.Value.ContentID != nil {
-		contentID = *res.Value.ContentID
-	}
+	identity := res.fileIdentity(aid, version)
 	var prepared media.Prepared
 	var err error
 	if purpose == "thumbnail" { // thumbnails have a separate immutable cache version.
-		prepared, err = s.Relay.PrepareThumbnail(ctx, res.Value.Platform, contentID, *a)
+		prepared, err = s.Relay.PrepareThumbnail(ctx, identity, s.adapterVersion(), *a)
 	} else {
-		prepared, err = s.Relay.Prepare(ctx, res.Value.Platform, contentID, s.adapterVersion(), *a)
+		prepared, err = s.Relay.Prepare(ctx, identity, s.adapterVersion(), *a)
 	}
 	if err != nil {
 		fail(w, 503, "SERVICE_BUSY")

@@ -155,6 +155,9 @@ func TestLivePreviewVideoMySQL(t *testing.T) {
 
 func TestLivePreviewImagesMySQL(t *testing.T) {
 	h := newDeliveryHarness(t)
+	if _, err := h.db.Exec("UPDATE parse_result SET content_id=NULL WHERE id=? AND user_id=?", h.rid, h.user); err != nil {
+		t.Fatal(err)
+	}
 	result := h.req("GET", "/v1/results/"+h.rid, "", nil, 200)
 	aid := result["cover"].(map[string]any)["assetId"].(string)
 	mime, data := fixture.File("image")
@@ -202,6 +205,10 @@ func TestLivePreviewImagesMySQL(t *testing.T) {
 	w = previewRequest(h, "GET", large, "", 200)
 	if !bytes.Equal(w.Body.Bytes(), data) || w.Header().Get("Content-Type") != "image/png" {
 		t.Fatal("large preview changed original")
+	}
+	previewRequest(h, "GET", large, "", 200)
+	if h.gets != 2 {
+		t.Fatal("missing content ID should still cache each output for its owner", h.gets)
 	}
 	u, _ := url.Parse(large)
 	q := u.Query()

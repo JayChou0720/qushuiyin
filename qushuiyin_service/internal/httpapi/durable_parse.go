@@ -464,7 +464,7 @@ func (s *Mock) loadPersistentResult(ctx context.Context, user, id string) (*pers
 		u.Fragment, u.RawFragment = "", ""
 		out.history = &historySource{source, auth.Digest(s.Sessions.Key, "history:"+user+":"+u.String())}
 	}
-	rows, err := s.Sessions.DB.QueryContext(ctx, "SELECT id,type,role,order_no,source_candidates_enc FROM media_asset WHERE result_id=? AND user_id=? ORDER BY role,order_no", id, user)
+	rows, err := s.Sessions.DB.QueryContext(ctx, "SELECT id,type,role,order_no,version,source_candidates_enc FROM media_asset WHERE result_id=? AND user_id=? ORDER BY role,order_no", id, user)
 	if err != nil {
 		return nil, err
 	}
@@ -472,7 +472,7 @@ func (s *Mock) loadPersistentResult(ctx context.Context, user, id string) (*pers
 	for rows.Next() {
 		var a asset
 		var enc string
-		if err = rows.Scan(&a.ID, &a.Kind, &a.Role, &a.Order, &enc); err != nil {
+		if err = rows.Scan(&a.ID, &a.Kind, &a.Role, &a.Order, &a.Version, &enc); err != nil {
 			return nil, err
 		}
 		var sources []string

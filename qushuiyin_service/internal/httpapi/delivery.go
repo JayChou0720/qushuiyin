@@ -34,16 +34,24 @@ func (a sourceSnapshot) asset() parse.Asset {
 	}
 	return v
 }
-func sourceAsset(res *result, id string) *parse.Asset {
+func sourceAsset(res *result, id string) (*parse.Asset, int64) {
 	for i, a := range res.Assets {
 		if a.ID == id {
-			return &res.Value.Assets[i]
+			return &res.Value.Assets[i], a.Version
 		}
 	}
 	if res.Cover != nil && res.Cover.ID == id {
-		return res.Value.Cover
+		return res.Value.Cover, res.Cover.Version
 	}
-	return nil
+	return nil, 0
+}
+
+func (res *result) fileIdentity(assetID string, version int64) media.FileIdentity {
+	id := media.FileIdentity{Platform: res.Value.Platform, UserID: res.User, ResultID: res.ID, AssetID: assetID, AssetVersion: version}
+	if res.Value.ContentID != nil {
+		id.ContentID = *res.Value.ContentID
+	}
+	return id
 }
 
 func (s *Mock) deliveryPolicy(ctx context.Context, res *result, a asset) (string, error) {
@@ -241,7 +249,7 @@ func (s *Mock) prepareDelivery(ctx context.Context, b *batch, x *item, res *pers
 		x.Failure = parseError(e)
 		return
 	}
-	source := sourceAsset(res.result, x.Asset.ID)
+	source, assetVersion := sourceAsset(res.result, x.Asset.ID)
 	if source == nil {
 		return
 	}
@@ -276,11 +284,8 @@ func (s *Mock) prepareDelivery(ctx context.Context, b *batch, x *item, res *pers
 		return
 	}
 	if d.Mode == "relay" {
-		content := ""
-		if res.Value.ContentID != nil {
-			content = *res.Value.ContentID
-		}
-		file, e := s.Relay.Prepare(ctx, res.Value.Platform, content, s.adapterVersion()+b.OutputVersion, a)
+		identity := res.fileIdentity(x.Asset.ID, assetVersion)
+		file, e := s.Relay.Prepare(ctx, identity, s.adapterVersion()+b.OutputVersion, a)
 		if errors.Is(e, media.ErrSourceExpired) {
 			d.URL = ""
 			if r := s.refreshSources(ctx, b, res, false); r == nil {
@@ -290,7 +295,7 @@ func (s *Mock) prepareDelivery(ctx context.Context, b *batch, x *item, res *pers
 				d = s.Relay.Decide(ctx, res.Value.Platform, policy, a, true)
 				x.DirectURL, x.DirectHost = d.URL, d.Host
 				x.AvailableUntil = minTime(b.ExpiresAt, d.Expires)
-				file, e = s.Relay.Prepare(ctx, res.Value.Platform, content, s.adapterVersion()+b.OutputVersion, a)
+				file, e = s.Relay.Prepare(ctx, identity, s.adapterVersion()+b.OutputVersion, a)
 			} else if r.Error() == "CONTENT_CHANGED" {
 				x.Failure = "CONTENT_CHANGED"
 				return
