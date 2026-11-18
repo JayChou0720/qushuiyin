@@ -23,7 +23,7 @@ type PreviewStream struct {
 }
 
 // A preview is a bounded range, never a prepared download or a source URL outlet.
-func (r *Relay) VideoPreview(ctx context.Context, platform string, a parse.Asset, header string, head bool, budget int64) (PreviewStream, error) {
+func (r *Relay) VideoPreview(ctx context.Context, platform string, a parse.Asset, header string, head bool, reserve func(int64) int64) (PreviewStream, error) {
 	var out PreviewStream
 	limits := config.Defaults()
 	limits.Media = r.Settings.Seconds("media_fetch_timeout_seconds")
@@ -38,6 +38,7 @@ func (r *Relay) VideoPreview(ctx context.Context, platform string, a parse.Asset
 	if err != nil {
 		return out, err
 	}
+	budget := reserve(end - start + 1)
 	if budget <= 0 {
 		return out, errors.New("RATE_LIMITED")
 	}

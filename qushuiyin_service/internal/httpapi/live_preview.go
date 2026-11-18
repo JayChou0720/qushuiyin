@@ -187,24 +187,37 @@ func (s *Mock) livePreviewMedia(w http.ResponseWriter, r *http.Request, purpose 
 	counted := &countedMediaResponse{ResponseWriter: w}
 	if purpose == "preview" {
 		limit := s.Settings.Int("preview_max_bytes")
-		stream, err := s.Relay.VideoPreview(ctx, res.Value.Platform, *a, r.Header.Get("Range"), r.Method == "HEAD", limit)
+		key := purpose + ":" + id
+		var settle func(int64)
+		defer func() {
+			if settle != nil {
+				settle(counted.sent)
+			}
+		}()
+		head := r.Method == http.MethodHead
+		stream, err := s.Relay.VideoPreview(ctx, res.Value.Platform, *a, r.Header.Get("Range"), head, func(want int64) int64 {
+			if head {
+				return min(want, s.remainingPreviewBytes(key, limit))
+			}
+			size, done, err := s.reserveMediaBytes(ctx, p.user, key, p.expires, want, limit, true)
+			if err != nil {
+				return 0
+			}
+			settle = done
+			return size
+		})
 		if err != nil {
-			if err.Error() == "BAD_RANGE" {
+			switch err.Error() {
+			case "BAD_RANGE":
 				fail(w, 416, "BAD_REQUEST")
-			} else {
+			case "RATE_LIMITED":
+				fail(w, 429, "RATE_LIMITED")
+			default:
 				fail(w, 503, "DIRECT_DOWNLOAD_UNAVAILABLE")
 			}
 			return
 		}
 		defer stream.Body.Close()
-		if r.Method != "HEAD" {
-			settle, err := s.reservePreviewBytes(ctx, p.user, purpose+":"+id, p.expires, stream.Size, limit)
-			if err != nil {
-				fail(w, 429, "RATE_LIMITED")
-				return
-			}
-			defer func() { settle(counted.sent) }()
-		}
 		w.Header().Set("Content-Type", "video/mp4")
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Accept-Ranges", "bytes")

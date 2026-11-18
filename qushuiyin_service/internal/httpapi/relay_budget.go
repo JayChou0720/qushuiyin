@@ -15,8 +15,23 @@ type ticketBudget struct {
 	used, reserved int64
 }
 
-// Reservation prevents concurrent ranges from multiplying a bearer's allowance.
+func (s *Mock) remainingPreviewBytes(key string, limit int64) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if b := s.byteBudgets[key]; b != nil {
+		return max(0, limit-b.used-b.reserved)
+	}
+	return limit
+}
+
 func (s *Mock) reservePreviewBytes(ctx context.Context, user, key string, expires time.Time, n, limit int64) (func(int64), error) {
+	_, settle, err := s.reserveMediaBytes(ctx, user, key, expires, n, limit, false)
+	return settle, err
+}
+
+// Reserve from the ticket first, then atomically cap against both daily quotas.
+// Video previews can serve a shorter range when any byte allowance runs low.
+func (s *Mock) reserveMediaBytes(ctx context.Context, user, key string, expires time.Time, n, limit int64, partial bool) (int64, func(int64), error) {
 	s.mu.Lock()
 	if s.byteBudgets == nil {
 		s.byteBudgets = map[string]*ticketBudget{}
@@ -31,30 +46,35 @@ func (s *Mock) reservePreviewBytes(ctx context.Context, user, key string, expire
 	if b == nil {
 		if int64(len(s.byteBudgets)) >= s.Settings.Int("memory_parse_cache_max_entries") {
 			s.mu.Unlock()
-			return nil, errors.New("SERVICE_BUSY")
+			return 0, nil, errors.New("SERVICE_BUSY")
 		}
 		b = &ticketBudget{expires: expires}
 		s.byteBudgets[key] = b
 	}
-	if n < 0 || n > limit-b.used-b.reserved || !now.Before(expires) {
+	remaining := limit - b.used - b.reserved
+	if partial {
+		n = min(n, remaining)
+	}
+	if n <= 0 || n > remaining || !now.Before(expires) {
 		s.mu.Unlock()
-		return nil, errors.New("RATE_LIMITED")
+		return 0, nil, errors.New("RATE_LIMITED")
 	}
 	b.reserved += n
 	s.mu.Unlock()
-	settle, err := s.reserveEgress(ctx, user, n)
+
+	size, settle, err := s.reserveEgress(ctx, user, n, partial)
+	s.mu.Lock()
+	b.reserved -= n - size
+	s.mu.Unlock()
 	if err != nil {
-		s.mu.Lock()
-		b.reserved -= n
-		s.mu.Unlock()
-		return nil, err
+		return 0, nil, err
 	}
 	var once sync.Once
-	return func(actual int64) {
+	return size, func(actual int64) {
 		once.Do(func() {
-			actual = max(0, min(actual, n))
+			actual = max(0, min(actual, size))
 			s.mu.Lock()
-			b.reserved -= n
+			b.reserved -= size
 			b.used += actual
 			s.mu.Unlock()
 			settle(actual)
@@ -86,11 +106,11 @@ func (s *Mock) acquireMedia(user, ticket string) (func(), bool) {
 		}
 	}, true
 }
-func (s *Mock) reserveEgress(ctx context.Context, user string, size int64) (func(int64), error) {
+func (s *Mock) reserveEgress(ctx context.Context, user string, size int64, partial bool) (int64, func(int64), error) {
 	day := time.Now().In(shanghaiDay).Format("2006-01-02")
 	tx, err := s.Sessions.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 	defer tx.Rollback()
 	subjects := []string{"global", user}
@@ -98,24 +118,30 @@ func (s *Mock) reserveEgress(ctx context.Context, user string, size int64) (func
 	for i, subject := range subjects {
 		_, err = tx.ExecContext(ctx, "INSERT INTO usage_counter(id,subject_key,stat_date,kind,value) VALUES (?,?,?,'media_egress',0) ON DUPLICATE KEY UPDATE value=value", auth.ID(), subject, day)
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 		var current int64
 		if err = tx.QueryRowContext(ctx, "SELECT value FROM usage_counter WHERE subject_key=? AND stat_date=? AND kind='media_egress' FOR UPDATE", subject, day).Scan(&current); err != nil {
-			return nil, err
+			return 0, nil, err
 		}
-		if size > limits[i]-current {
-			return nil, errors.New("media egress quota exceeded")
+		remaining := limits[i] - current
+		if partial {
+			size = min(size, remaining)
 		}
+		if size <= 0 || size > remaining {
+			return 0, nil, errors.New("media egress quota exceeded")
+		}
+	}
+	for _, subject := range subjects {
 		_, err = tx.ExecContext(ctx, "UPDATE usage_counter SET value=value+? WHERE subject_key=? AND stat_date=? AND kind='media_egress'", size, subject, day)
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 	}
 	if err = tx.Commit(); err != nil {
-		return nil, err
+		return 0, nil, err
 	}
-	return func(actual int64) {
+	return size, func(actual int64) {
 		settle, cancel := context.WithTimeout(context.Background(), s.Settings.Seconds("parse_job_timeout_seconds"))
 		defer cancel()
 		// Failure leaves a conservative full reservation; it cannot overspend quota.

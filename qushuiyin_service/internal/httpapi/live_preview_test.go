@@ -113,11 +113,19 @@ func TestLivePreviewVideoMySQL(t *testing.T) {
 	if w.Body.Len() != 12 || w.Header().Get("Content-Range") == "" {
 		t.Fatal("unbounded preview")
 	}
-	previewRequest(h, "GET", address, "bytes=0-11", 206)
+	w = previewRequest(h, "GET", address, "bytes=0-23", 206)
+	if w.Body.Len() != 12 || !strings.HasPrefix(w.Header().Get("Content-Range"), "bytes 0-11/") {
+		t.Fatal("preview ignored remaining ticket bytes", w.Header(), w.Body.Len())
+	}
 	previewRequest(h, "GET", address, "bytes=0-11", 429)
 	var charged int64
 	if e := h.db.QueryRow("SELECT value FROM usage_counter WHERE subject_key=? AND kind='media_egress'", h.user).Scan(&charged); e != nil || charged != 24 {
 		t.Fatal("preview accounting", charged, e)
+	}
+	h.s.Settings.Data["user_media_egress_per_day_bytes"] = json.RawMessage(`30`)
+	w = previewRequest(h, "GET", previewURL(h, h.aid), "bytes=0-23", 206)
+	if w.Body.Len() != 6 {
+		t.Fatal("preview ignored remaining daily bytes", w.Body.Len())
 	}
 	previewRequest(h, "GET", address, "bytes=0-1,5-8", 416)
 	u, _ := url.Parse(address)

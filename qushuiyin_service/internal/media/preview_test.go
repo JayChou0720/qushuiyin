@@ -79,7 +79,7 @@ func TestVideoPreviewRejectsIgnoredAndInconsistentRanges(t *testing.T) {
 				}
 				return &http.Response{StatusCode: tc.status, ContentLength: int64(n), Header: http.Header{"Content-Type": {"video/mp4"}, "Content-Range": {tc.contentRange}}, Body: io.NopCloser(bytes.NewReader(body[:n]))}, nil
 			})}}
-			out, e := r.VideoPreview(t.Context(), "douyin", parse.Asset{Kind: "video", Source: "https://cdn.example.test/video"}, tc.rangeValue, false, 24)
+			out, e := r.VideoPreview(t.Context(), "douyin", parse.Asset{Kind: "video", Source: "https://cdn.example.test/video"}, tc.rangeValue, false, func(n int64) int64 { return min(n, 24) })
 			if (e == nil) != tc.valid {
 				t.Fatal("range validation", e)
 			}
