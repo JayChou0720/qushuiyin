@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"qushuiyin/service/internal/auth"
@@ -171,10 +170,7 @@ func (s *Mock) livePreviewMedia(w http.ResponseWriter, r *http.Request, purpose 
 		fail(w, 403, "ACCESS_DENIED")
 		return
 	}
-	if len(r.Header.Values("Range")) > 1 || strings.Contains(r.Header.Get("Range"), ",") {
-		fail(w, 416, "BAD_REQUEST")
-		return
-	}
+	rangeHeader := mediaRangeHeader(r)
 	release, allowed := s.acquireMedia(p.user, id)
 	if !allowed {
 		fail(w, 503, "SERVICE_BUSY")
@@ -195,7 +191,7 @@ func (s *Mock) livePreviewMedia(w http.ResponseWriter, r *http.Request, purpose 
 			}
 		}()
 		head := r.Method == http.MethodHead
-		stream, err := s.Relay.VideoPreview(ctx, res.Value.Platform, *a, r.Header.Get("Range"), head, func(want int64) int64 {
+		stream, err := s.Relay.VideoPreview(ctx, res.Value.Platform, *a, rangeHeader, head, func(want int64) int64 {
 			if head {
 				return min(want, s.remainingPreviewBytes(key, limit))
 			}
@@ -209,7 +205,7 @@ func (s *Mock) livePreviewMedia(w http.ResponseWriter, r *http.Request, purpose 
 		if err != nil {
 			switch err.Error() {
 			case "BAD_RANGE":
-				fail(w, 416, "BAD_REQUEST")
+				rejectMediaRange(w, stream.TotalSize)
 			case "RATE_LIMITED":
 				fail(w, 429, "RATE_LIMITED")
 			default:
@@ -254,12 +250,12 @@ func (s *Mock) livePreviewMedia(w http.ResponseWriter, r *http.Request, purpose 
 		fail(w, 410, "MEDIA_SOURCE_EXPIRED")
 		return
 	}
-	if r.Method != "HEAD" {
-		n, valid := mediaRangeSize(r.Header.Get("Range"), prepared.Size)
-		if !valid {
-			fail(w, 416, "BAD_REQUEST")
-			return
-		}
+	n, valid := mediaRangeSize(rangeHeader, prepared.Size)
+	if !valid {
+		rejectMediaRange(w, prepared.Size)
+		return
+	}
+	if r.Method != http.MethodHead {
 		if r.Header.Get("If-Range") != "" {
 			n = prepared.Size
 		}

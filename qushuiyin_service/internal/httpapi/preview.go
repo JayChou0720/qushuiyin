@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"qushuiyin/service/internal/auth"
@@ -141,12 +140,11 @@ func (s *Mock) previewMedia(path string) http.HandlerFunc {
 			fail(w, 403, "ACCESS_DENIED")
 			return
 		}
-		ranges := r.Header.Values("Range")
-		if len(ranges) > 1 || (len(ranges) == 1 && strings.Contains(ranges[0], ",")) {
-			fail(w, 416, "BAD_REQUEST")
+		mime, data := fixture.File(kind)
+		if _, valid := mediaRangeSize(mediaRangeHeader(r), int64(len(data))); !valid {
+			rejectMediaRange(w, int64(len(data)))
 			return
 		}
-		mime, data := fixture.File(kind)
 		if r.Method == http.MethodGet {
 			s.mu.Lock()
 			// Reserve at most one full fixture per request, even for a short range.

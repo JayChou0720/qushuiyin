@@ -1,6 +1,13 @@
 package httpapi
 
-import "testing"
+import (
+	"encoding/json"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"qushuiyin/service/internal/media"
+)
 
 func TestMediaRangeReservation(t *testing.T) {
 	for _, tc := range []struct {
@@ -27,5 +34,25 @@ func TestMediaRangeReservation(t *testing.T) {
 				t.Fatalf("reservation = %d, %v; want %d, %v", n, valid, tc.bytes, tc.valid)
 			}
 		})
+	}
+}
+
+func TestBatchStatusReturnsNullForUnknownSize(t *testing.T) {
+	expires := time.Now().Add(time.Hour)
+	b := &batch{ID: "batch", User: "owner", ExpiresAt: expires, Items: []item{
+		{ID: "item", Status: "READY", Mode: "direct", Asset: asset{Kind: "video"}, AvailableUntil: expires},
+	}}
+	s := &Mock{Relay: &media.Relay{}, batches: map[string]*batch{b.ID: b}}
+	r := httptest.NewRequest("GET", "/v1/save-batches/"+b.ID, nil)
+	r.SetPathValue("batchId", b.ID)
+	w := httptest.NewRecorder()
+	s.batchStatus(w, r, credential{User: b.User})
+	var out struct {
+		Data struct {
+			Items []map[string]json.RawMessage
+		}
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil || w.Code != 200 || len(out.Data.Items) != 1 || string(out.Data.Items[0]["sizeBytes"]) != "null" {
+		t.Fatalf("unknown size was not encoded as null: %s", w.Body.String())
 	}
 }

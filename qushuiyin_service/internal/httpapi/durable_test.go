@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -287,6 +288,14 @@ func TestDurableTasksMySQL(t *testing.T) {
 		lh.ServeHTTP(reply, get)
 		if reply.Code != 206 || reply.Body.Len() != 12 || string(reply.Body.Bytes()[4:8]) != "ftyp" {
 			t.Fatalf("relay did not serve validated file bytes: %d", reply.Code)
+		}
+		badRange := httptest.NewRequest("HEAD", u.RequestURI(), nil)
+		badRange.Header.Add("Range", "bytes=0-1")
+		badRange.Header.Add("Range", "bytes=3-4")
+		badReply := httptest.NewRecorder()
+		lh.ServeHTTP(badReply, badRange)
+		if want := fmt.Sprintf("bytes */%v", b["items"].([]any)[0].(map[string]any)["sizeBytes"]); badReply.Code != 416 || badReply.Header().Get("Content-Range") != want {
+			t.Fatal("relay did not report the unsatisfied range size", badReply.Code, badReply.Header())
 		}
 		var charged int64
 		if e = db.QueryRow("SELECT value FROM usage_counter WHERE subject_key=? AND kind='media_egress'", login.UserID).Scan(&charged); e != nil || charged != 12 {

@@ -201,8 +201,13 @@ func (s *Mock) batchStatus(w http.ResponseWriter, r *http.Request, c credential)
 			kind = mime
 			size = len(raw)
 			if s.Relay != nil {
-				kind = x.MIME
-				size = x.Size
+				kind, size = nil, nil
+				if x.MIME != "" {
+					kind = x.MIME
+				}
+				if x.Size > 0 {
+					size = x.Size
+				}
 			}
 		}
 		if x.Failure != "" {
@@ -379,6 +384,10 @@ func (s *Mock) download(mode string) http.HandlerFunc {
 			return
 		}
 		mime, data := fixture.File(kind)
+		if _, valid := mediaRangeSize(mediaRangeHeader(r), int64(len(data))); !valid {
+			rejectMediaRange(w, int64(len(data)))
+			return
+		}
 		w.Header().Set("Content-Type", mime)
 		w.Header().Set("Cache-Control", "no-store")
 		http.ServeContent(w, r, "sample", time.Time{}, bytes.NewReader(data))

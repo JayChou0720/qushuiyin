@@ -18,6 +18,7 @@ import (
 type PreviewStream struct {
 	Body         io.ReadCloser
 	Size         int64
+	TotalSize    int64
 	Status       int
 	ContentRange string
 }
@@ -34,6 +35,7 @@ func (r *Relay) VideoPreview(ctx context.Context, platform string, a parse.Asset
 		return out, errors.New("FORMAT_UNSUPPORTED")
 	}
 	total := *o.Size
+	out.TotalSize = total
 	start, end, err := previewRange(header, total)
 	if err != nil {
 		return out, err

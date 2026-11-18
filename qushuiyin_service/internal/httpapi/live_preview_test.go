@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -127,7 +128,10 @@ func TestLivePreviewVideoMySQL(t *testing.T) {
 	if w.Body.Len() != 6 {
 		t.Fatal("preview ignored remaining daily bytes", w.Body.Len())
 	}
-	previewRequest(h, "GET", address, "bytes=0-1,5-8", 416)
+	w = previewRequest(h, "GET", address, "bytes=0-1,5-8", 416)
+	if w.Header().Get("Content-Range") != "bytes */"+strconv.FormatInt(h.size, 10) {
+		t.Fatal("preview did not report the unsatisfied range size", w.Header())
+	}
 	u, _ := url.Parse(address)
 	q := u.Query()
 	q.Set("t", "bad")

@@ -12,11 +12,6 @@ func (s *Mock) relayDownload(w http.ResponseWriter, r *http.Request, user, bid, 
 		fail(w, 405, "BAD_REQUEST")
 		return
 	}
-	ranges := r.Header.Values("Range")
-	if len(ranges) > 1 || len(ranges) == 1 && strings.Contains(ranges[0], ",") {
-		fail(w, 416, "BAD_REQUEST")
-		return
-	}
 	var key, mime, hash string
 	var size int64
 	err := s.Sessions.DB.QueryRowContext(r.Context(), `SELECT f.storage_key,f.mime_type,f.sha256,f.size_bytes FROM media_object o JOIN media_file f ON f.id=o.file_id JOIN save_batch_item i ON i.media_object_id=o.id JOIN save_batch b ON b.id=i.batch_id WHERE o.id=? AND o.user_id=? AND i.user_id=? AND b.user_id=? AND b.id=? AND o.status='ready' AND f.status='ready' AND i.prepare_status='READY' AND b.cancel_requested=FALSE AND o.expires_at>UTC_TIMESTAMP(3) AND f.expires_at>UTC_TIMESTAMP(3) AND b.expires_at>UTC_TIMESTAMP(3)`, oid, user, user, user, bid).Scan(&key, &mime, &hash, &size)
@@ -42,12 +37,12 @@ func (s *Mock) relayDownload(w http.ResponseWriter, r *http.Request, user, bid, 
 	}
 	defer releaseConnection()
 	counted := &countedMediaResponse{ResponseWriter: w}
+	reserve, valid := mediaRangeSize(mediaRangeHeader(r), size)
+	if !valid {
+		rejectMediaRange(w, size)
+		return
+	}
 	if r.Method == http.MethodGet {
-		reserve, valid := mediaRangeSize(r.Header.Get("Range"), size)
-		if !valid {
-			fail(w, 416, "BAD_REQUEST")
-			return
-		}
 		if r.Header.Get("If-Range") != "" {
 			reserve = size
 		}
@@ -66,11 +61,20 @@ func (s *Mock) relayDownload(w http.ResponseWriter, r *http.Request, user, bid, 
 	http.ServeContent(counted, r, "media", time.Time{}, file)
 }
 
+func mediaRangeHeader(r *http.Request) string {
+	return strings.Join(r.Header.Values("Range"), ",")
+}
+
+func rejectMediaRange(w http.ResponseWriter, size int64) {
+	w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(size, 10))
+	fail(w, http.StatusRequestedRangeNotSatisfiable, "BAD_REQUEST")
+}
+
 func mediaRangeSize(header string, size int64) (int64, bool) {
 	if header == "" {
 		return size, true
 	}
-	if !strings.HasPrefix(header, "bytes=") {
+	if !strings.HasPrefix(header, "bytes=") || strings.Contains(header, ",") {
 		return 0, false
 	}
 	parts := strings.SplitN(strings.TrimPrefix(header, "bytes="), "-", 2)
