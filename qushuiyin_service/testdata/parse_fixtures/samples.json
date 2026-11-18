@@ -1,0 +1,98 @@
+{
+  "https://www.douyin.com/video/10001": {
+    "info": {
+      "video_url": "https://media.example.test/sample.mp4",
+      "cover_url": "https://media.example.test/cover.jpg",
+      "title": "M0 douyin"
+    }
+  },
+  "https://www.douyin.com/video/10002": {
+    "info": {
+      "images": [
+        {
+          "url": "https://media.example.test/1.jpg",
+          "live_photo_url": "https://media.example.test/live.mp4"
+        },
+        {
+          "url": "https://media.example.test/2.jpg"
+        }
+      ],
+      "video_url": "https://media.example.test/mixed.mp4"
+    }
+  },
+  "https://www.douyin.com/video/10003": {
+    "failure": true
+  },
+  "https://www.xiaohongshu.com/explore/10001": {
+    "info": {
+      "video_url": "https://media.example.test/sample.mp4",
+      "cover_url": "https://media.example.test/cover.jpg",
+      "title": "M0 xiaohongshu"
+    }
+  },
+  "https://www.xiaohongshu.com/explore/10002": {
+    "info": {
+      "images": [
+        {
+          "url": "https://media.example.test/1.jpg",
+          "live_photo_url": "https://media.example.test/live.mp4"
+        },
+        {
+          "url": "https://media.example.test/2.jpg"
+        }
+      ],
+      "video_url": "https://media.example.test/mixed.mp4"
+    }
+  },
+  "https://www.xiaohongshu.com/explore/10003": {
+    "failure": true
+  },
+  "https://www.kuaishou.com/short-video/10001": {
+    "info": {
+      "video_url": "https://media.example.test/sample.mp4",
+      "cover_url": "https://media.example.test/cover.jpg",
+      "title": "M0 kuaishou"
+    }
+  },
+  "https://www.kuaishou.com/short-video/10002": {
+    "info": {
+      "images": [
+        {
+          "url": "https://media.example.test/1.jpg",
+          "live_photo_url": "https://media.example.test/live.mp4"
+        },
+        {
+          "url": "https://media.example.test/2.jpg"
+        }
+      ],
+      "video_url": "https://media.example.test/mixed.mp4"
+    }
+  },
+  "https://www.kuaishou.com/short-video/10003": {
+    "failure": true
+  },
+  "https://www.bilibili.com/video/BV10001": {
+    "info": {
+      "video_url": "https://media.example.test/sample.mp4",
+      "cover_url": "https://media.example.test/cover.jpg",
+      "title": "M0 bilibili"
+    }
+  },
+  "https://www.bilibili.com/video/BV10002": {
+    "info": {
+      "images": [
+        {
+          "url": "https://media.example.test/1.jpg",
+          "live_photo_url": "https://media.example.test/live.mp4"
+        },
+        {
+          "url": "https://media.example.test/2.jpg"
+        }
+      ],
+      "video_url": "https://media.example.test/mixed.mp4"
+    }
+  },
+  "https://www.bilibili.com/video/BV10003": {
+    "failure": true
+  }
+}

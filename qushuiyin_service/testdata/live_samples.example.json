@@ -1,0 +1,11 @@
+[
+  {
+    "url": "https://www.douyin.com/video/REPLACE_WITH_AUTHORIZED_SAMPLE",
+    "platform": "douyin",
+    "mediaType": "video"
+  },
+  {
+    "url": "https://www.bilibili.com/video/REPLACE_WITH_AUTHORIZED_MULTIPART_SAMPLE?p=2",
+    "error": "CONTENT_TYPE_UNSUPPORTED"
+  }
+]

@@ -1,0 +1,132 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"github.com/pressly/goose/v3"
+	"io"
+	"os"
+	"os/signal"
+	"qushuiyin/service/internal/config"
+	"qushuiyin/service/internal/db"
+	"qushuiyin/service/internal/media"
+	"qushuiyin/service/internal/outbound"
+	"qushuiyin/service/internal/parse"
+	"qushuiyin/service/migrations"
+	"time"
+)
+
+type report struct {
+	Mode      string              `json:"mode"`
+	Version   string              `json:"adapterVersion"`
+	At        time.Time           `json:"sampledAt"`
+	Platform  string              `json:"platform"`
+	ID        *string             `json:"contentId"`
+	Kind      string              `json:"mediaType"`
+	Count     int                 `json:"assetCount"`
+	Mixed     bool                `json:"imagesAndVideo"`
+	Warnings  []string            `json:"warnings"`
+	Resources []media.Observation `json:"resources"`
+}
+
+func run(ctx context.Context, args []string, getenv func(string) string, out io.Writer) error {
+	if len(args) != 2 || (args[0] != "probe" && (args[0] != "migrate" || (args[1] != "up" && args[1] != "status"))) {
+		return errors.New("usage: qushuiyin-server probe <share-url> | migrate up | migrate status")
+	}
+	l := config.Defaults()
+	mode := getenv("PARSE_MODE")
+	env := getenv("APP_ENV")
+	if mode == "" {
+		mode = "live"
+	}
+	if args[0] == "probe" && (env != "local" && env != "test") {
+		return errors.New("probe requires APP_ENV=local or test")
+	}
+	if mode != "mock" && mode != "live" {
+		return errors.New("invalid PARSE_MODE")
+	}
+	if mode == "live" && (getenv("PARSE_VIDEO_DOUYIN_COOKIE") != "" || getenv("MOCK_MEDIA_ORIGIN") != "") {
+		return errors.New("live mode rejects cookie and mock overrides")
+	}
+	var store media.Domains
+	dsn := getenv("MYSQL_DSN")
+	if args[0] == "migrate" || (mode == "live" && dsn != "") {
+		if dsn == "" {
+			return errors.New("MYSQL_DSN required")
+		}
+		conn, e := sql.Open("mysql", dsn)
+		if e != nil {
+			return errors.New("invalid database configuration")
+		}
+		defer conn.Close()
+		if args[0] == "migrate" {
+			provider, e := goose.NewProvider(goose.DialectMySQL, conn, migrations.FS)
+			if e != nil {
+				return errors.New("migration initialization failed")
+			}
+			if args[1] == "up" {
+				if _, e = provider.Up(ctx); e != nil {
+					return errors.New("migration failed")
+				}
+				fmt.Fprintln(out, "up to date")
+				return nil
+			}
+			states, e := provider.Status(ctx)
+			if e != nil {
+				return errors.New("migration status unavailable")
+			}
+			for _, s := range states {
+				fmt.Fprintln(out, s.Source.Version, s.State)
+			}
+			return nil
+		}
+		store = db.Domains{DB: conn}
+	}
+	client := outbound.Client{Transport: outbound.Transport(), Redirects: l.Redirects}
+	policy := parse.ValidationPolicy()
+	adapter := parse.Live(l, policy, client)
+	if mode == "mock" {
+		var e error
+		adapter, e = parse.Mock(l, policy)
+		if e != nil {
+			return errors.New("invalid fixtures")
+		}
+		client.Transport = media.FixtureHeaders{}
+	}
+	r, e := adapter.Parse(ctx, args[1])
+	if e != nil {
+		return e
+	}
+	rep := report{Mode: mode, Version: parse.Version, At: time.Now().UTC(), Platform: r.Platform, ID: r.ContentID, Kind: r.MediaType, Count: len(r.Assets), Mixed: r.Mixed, Warnings: r.Warnings}
+	probe := media.Probe{Client: client, Limits: l, Domains: store}
+	batch, cancel := context.WithTimeout(ctx, l.Batch)
+	defer cancel()
+	assets := r.Assets
+	if r.Cover != nil {
+		assets = append(assets, *r.Cover)
+	}
+	failedStore := false
+	for _, asset := range assets {
+		obs := probe.Inspect(batch, r.Platform, asset)
+		failedStore = failedStore || obs.Reason == "DOMAIN_STORE_FAILED"
+		rep.Resources = append(rep.Resources, obs)
+	}
+	if e = json.NewEncoder(out).Encode(rep); e != nil {
+		return errors.New("output failed")
+	}
+	if failedStore {
+		return errors.New("domain observation was not persisted")
+	}
+	return nil
+}
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+	if err := run(ctx, os.Args[1:], os.Getenv, os.Stdout); err != nil {
+		json.NewEncoder(os.Stderr).Encode(map[string]string{"error": err.Error()})
+		os.Exit(1)
+	}
+}
