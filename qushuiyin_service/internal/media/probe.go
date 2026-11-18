@@ -1,8 +1,10 @@
 package media
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"net/url"
@@ -56,21 +58,75 @@ func size(resp *http.Response) (*int64, bool) {
 	return &n, true
 }
 func (p Probe) Inspect(ctx context.Context, platform string, a parse.Asset) Observation {
-	o := Observation{Order: a.Order, Role: a.Role, Domain: "untracked", Reason: "PROBE_FAILED"}
 	ctx, cancel := context.WithTimeout(ctx, p.Limits.Media)
 	defer cancel()
+	best := p.inspectSource(ctx, platform, a, a.Source)
+	for i, source := range a.Alternates {
+		if best.Direct || best.Reason == "DOMAIN_STORE_FAILED" || (p.Domains == nil && best.Reason == "DOMAIN_NOT_REGISTERED") || i+1 >= p.Limits.MediaCandidates || ctx.Err() != nil {
+			break
+		}
+		obs := p.inspectSource(ctx, platform, a, source)
+		if obs.Direct || obs.Reason == "DOMAIN_STORE_FAILED" {
+			return obs
+		}
+		if best.Reason != "DOMAIN_NOT_REGISTERED" && obs.Reason == "DOMAIN_NOT_REGISTERED" {
+			best = obs
+		}
+	}
+	return best
+}
+
+func contentType(resp *http.Response) (string, bool) {
+	header := strings.TrimSpace(resp.Header.Get("Content-Type"))
+	typ, _, _ := mime.ParseMediaType(header)
+	return typ, header == "" || typ == "application/octet-stream" || typ == "binary/octet-stream"
+}
+
+func successStatus(code int) bool {
+	return code == http.StatusOK || code == http.StatusPartialContent
+}
+
+// The longest signature ends at byte 12. Small and unbounded responses alike
+// are read only up to that prefix, and never beyond the configured Range.
+func sniffMedia(r io.Reader, rangeBytes int64) string {
+	prefix, err := io.ReadAll(io.LimitReader(r, min(rangeBytes, 12)))
+	if err != nil {
+		return ""
+	}
+	switch {
+	case bytes.HasPrefix(prefix, []byte("\xff\xd8\xff")):
+		return "image/jpeg"
+	case bytes.HasPrefix(prefix, []byte("\x89PNG")):
+		return "image/png"
+	case len(prefix) >= 12 && string(prefix[:4]) == "RIFF" && string(prefix[8:12]) == "WEBP":
+		return "image/webp"
+	case len(prefix) >= 8 && string(prefix[4:8]) == "ftyp":
+		return "video/mp4"
+	}
+	return ""
+}
+
+func (p Probe) inspectSource(ctx context.Context, platform string, a parse.Asset, source string) Observation {
+	o := Observation{Order: a.Order, Role: a.Role, Domain: "untracked", Reason: "PROBE_FAILED"}
 	allow := func(u *url.URL) bool { return outbound.HTTPS(u) }
-	resp, e := p.Client.Headers(ctx, a.Source, "HEAD", "", allow)
+	resp, e := p.Client.Headers(ctx, source, "HEAD", "", allow)
 	if e != nil {
 		return o
 	}
-	if resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
+	mt, generic := contentType(resp)
+	sniff := successStatus(resp.StatusCode) && generic
+	if sniff || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
 		raw := resp.Request.URL.String()
 		resp.Body.Close()
+		if p.Limits.RangeBytes <= 0 {
+			return o
+		}
 		resp, e = p.Client.Headers(ctx, raw, "GET", fmt.Sprintf("bytes=0-%d", p.Limits.RangeBytes-1), allow)
 		if e != nil {
 			return o
 		}
+		mt, generic = contentType(resp)
+		sniff = sniff || generic
 	}
 	defer resp.Body.Close()
 	o.Host = strings.ToLower(resp.Request.URL.Hostname())
@@ -82,19 +138,22 @@ func (p Probe) Inspect(ctx context.Context, platform string, a parse.Asset) Obse
 			return o
 		}
 	}
-	if resp.StatusCode != 200 && resp.StatusCode != 206 {
+	if !successStatus(resp.StatusCode) {
 		o.Reason = "HTTP_STATUS"
 		return o
-	}
-	mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if len(mt) <= 100 {
-		o.Type = mt
 	}
 	var valid bool
 	o.Size, valid = size(resp)
 	if !valid {
 		o.Reason = "INVALID_SIZE"
 		return o
+	}
+	if sniff {
+		// The validated Range starts at byte zero.
+		mt = sniffMedia(resp.Body, p.Limits.RangeBytes)
+	}
+	if len(mt) <= 100 {
+		o.Type = mt
 	}
 	limit := p.Limits.ImageBytes
 	ok := mt == "image/jpeg" || mt == "image/png"

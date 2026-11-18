@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"path"
 	"strings"
 
 	"github.com/wujunwei928/parse-video/parser"
@@ -22,7 +23,7 @@ import (
 const shareOrigin = "https://www.iesdouyin.com"
 const itemPath = "/web/api/v2/aweme/iteminfo/"
 const mobileUA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
-const DouyinH5Version = "douyin-h5-iteminfo-v1"
+const DouyinH5Version = "douyin-h5-iteminfo-v2"
 
 // Same maximum response size as the pinned parser (§12.1).
 const h5MaxBytes = 16 << 20
@@ -158,7 +159,13 @@ func shareGet(ctx context.Context, c outbound.Client, jar http.CookieJar, raw, r
 	}
 	return nil, Unavailable
 }
-func douyinItem(ctx context.Context, c outbound.Client, work string) (*parser.VideoParseInfo, error) {
+
+type h5Item struct {
+	info            *parser.VideoParseInfo
+	imageAlternates [][]string
+}
+
+func douyinItem(ctx context.Context, c outbound.Client, work string) (*h5Item, error) {
 	jar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
 	if err != nil {
 		return nil, Unavailable
@@ -189,7 +196,30 @@ func (u h5URLs) first() string {
 	}
 	return u.URLs[0]
 }
-func parseItem(data []byte, work string) (*parser.VideoParseInfo, error) {
+
+func (u h5URLs) gallerySources() (string, []string) {
+	if len(u.URLs) == 0 {
+		return "", nil
+	}
+	primary := 0
+	for i, candidate := range u.URLs {
+		parsed, err := url.Parse(candidate)
+		if err != nil {
+			continue
+		}
+		ext := strings.ToLower(path.Ext(parsed.Path))
+		if (ext == ".jpg" || ext == ".jpeg") && httpsMediaSource(candidate) != "" {
+			primary = i
+			break
+		}
+	}
+	alternates := make([]string, 0, len(u.URLs)-1)
+	alternates = append(alternates, u.URLs[:primary]...)
+	alternates = append(alternates, u.URLs[primary+1:]...)
+	return u.URLs[primary], alternates
+}
+
+func parseItem(data []byte, work string) (*h5Item, error) {
 	var reply struct {
 		Status *int `json:"status_code"`
 		Items  []struct {
@@ -228,9 +258,11 @@ func parseItem(data []byte, work string) (*parser.VideoParseInfo, error) {
 			v = u.String()
 		}
 	}
-	info := &parser.VideoParseInfo{Title: item.Desc, VideoUrl: v, CoverUrl: item.Video.Cover.first()}
+	result := &h5Item{info: &parser.VideoParseInfo{Title: item.Desc, VideoUrl: v, CoverUrl: item.Video.Cover.first()}}
 	for _, image := range item.Images {
-		info.Images = append(info.Images, parser.ImgInfo{Url: image.first()})
+		primary, alternates := image.gallerySources()
+		result.info.Images = append(result.info.Images, parser.ImgInfo{Url: primary})
+		result.imageAlternates = append(result.imageAlternates, alternates)
 	}
-	return info, nil
+	return result, nil
 }

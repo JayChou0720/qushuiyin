@@ -32,7 +32,8 @@ func ValidationPolicy() map[string]Capability {
 type Asset struct {
 	Kind, Role string
 	Order      int
-	Source     string `json:"-"`
+	Source     string   `json:"-"`
+	Alternates []string `json:"-"`
 }
 type Result struct {
 	Platform, MediaType                       string
@@ -47,7 +48,7 @@ type Adapter struct {
 	Policy      map[string]Capability
 	Resolve     func(context.Context, string) (*parser.VideoParseInfo, error)
 	Canonical   func(context.Context, string, string) *url.URL
-	douyin      func(context.Context, string) (*parser.VideoParseInfo, error)
+	douyin      func(context.Context, string) (*h5Item, error)
 	coverClient outbound.Client
 }
 
@@ -72,12 +73,17 @@ func Live(l config.Limits, policy map[string]Capability, c outbound.Client) Adap
 				return nil
 			}
 			defer resp.Body.Close()
+			if p == "douyin" && contentID(p, resp.Request.URL) != nil {
+				// Short-link expansion only needs the work ID. The terminal
+				// public page can reject HEAD while H5 iteminfo still works.
+				return resp.Request.URL
+			}
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 				return nil
 			}
 			return resp.Request.URL
 		},
-		douyin: func(ctx context.Context, id string) (*parser.VideoParseInfo, error) {
+		douyin: func(ctx context.Context, id string) (*h5Item, error) {
 			return douyinItem(ctx, c, id)
 		},
 		coverClient: c,
@@ -96,6 +102,17 @@ func clip(s string, n int) (*string, bool) {
 	}
 	return text(s), false
 }
+
+func httpsMediaSource(raw string) string {
+	if strings.HasPrefix(strings.ToLower(raw), "http://") {
+		raw = "https" + raw[len("http"):]
+	}
+	if u, err := url.Parse(raw); err != nil || !outbound.HTTPS(u) {
+		return ""
+	}
+	return raw
+}
+
 func (a Adapter) Parse(ctx context.Context, raw string) (*Result, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -131,12 +148,17 @@ func (a Adapter) Parse(ctx context.Context, raw string) (*Result, error) {
 	call, done := context.WithTimeout(ctx, a.Limits.ParserCall)
 	defer done()
 	var info *parser.VideoParseInfo
+	var imageAlternates [][]string
 	if p == "douyin" && a.douyin != nil {
 		work := contentID(p, canonical)
 		if work == nil {
 			err = Unavailable
 		} else {
-			info, err = a.douyin(call, *work)
+			var item *h5Item
+			item, err = a.douyin(call, *work)
+			if item != nil {
+				info, imageAlternates = item.info, item.imageAlternates
+			}
 		}
 	} else {
 		info, err = a.Resolve(call, raw)
@@ -166,14 +188,11 @@ func (a Adapter) Parse(ctx context.Context, raw string) (*Result, error) {
 		}
 	}
 	asset := func(raw, kind, role string, i int) (Asset, error) {
-		if strings.HasPrefix(strings.ToLower(raw), "http://") {
-			raw = "https" + raw[len("http"):]
-		}
-		u, e := url.Parse(raw)
-		if e != nil || !outbound.HTTPS(u) {
+		source := httpsMediaSource(raw)
+		if source == "" {
 			return Asset{}, InvalidResponse
 		}
-		return Asset{kind, role, i, raw}, nil
+		return Asset{Kind: kind, Role: role, Order: i, Source: source}, nil
 	}
 	if len(info.Images) > 0 {
 		if !cap.Image || p == "bilibili" {
@@ -188,6 +207,16 @@ func (a Adapter) Parse(ctx context.Context, raw string) (*Result, error) {
 			x, e := asset(img.Url, "image", "content", i+1)
 			if e != nil {
 				return nil, e
+			}
+			if i < len(imageAlternates) {
+				seen := map[string]bool{x.Source: true}
+				for _, raw := range imageAlternates[i] {
+					alternate := httpsMediaSource(raw)
+					if alternate != "" && !seen[alternate] {
+						seen[alternate] = true
+						x.Alternates = append(x.Alternates, alternate)
+					}
+				}
 			}
 			r.Assets = append(r.Assets, x)
 			live = live || img.LivePhotoUrl != ""

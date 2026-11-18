@@ -1,13 +1,13 @@
 # M0 能力验证表
 
-已完成四平台首轮真实探测，以及抖音和小红书复测。**授权样本矩阵和真机验证待完成**。抖音复测用 `douyin-h5-iteminfo-v1`，其余平台用解析库提交 `00e8e118c7c52e287b6b06858639ee86aab0579c`。
+已完成四平台首轮真实探测。抖音、小红书用本地样本完成 JPEG 优先和魔数识别复测。**授权样本矩阵和真机验证待完成**。抖音最新复测用 `douyin-h5-iteminfo-v2`，其余平台用解析库提交 `00e8e118c7c52e287b6b06858639ee86aab0579c`。
 
 | 平台 | 视频 | 静态图集 | 封面 | 文案 |
 | --- | --- | --- | --- | --- |
-| 抖音 | 两个短链样本曾探测到 MP4，域名未登记，其中一条后续复跑失败 | 一个 H5 样本解析出 9 张静态图，均为 WebP，下载准备待验证 | 视频和图集样本均探测到 WebP，下载准备待验证 | H5 映射通过离线测试 |
-| 小红书 | 复测未取得媒体 | 复测未取得媒体 | 待验证 | 待验证 |
+| 抖音 | 本地样本探测到 MP4，域名未登记 | 两组共 27 张正文图均探测到 JPEG，域名未登记 | 视频和图集样本均探测到 WebP，下载准备待验证 | H5 映射通过离线测试 |
+| 小红书 | 本地样本探测到 MP4，域名未登记 | 本地样本 6 张正文图均探测到 JPEG，部分探测有波动 | 视频和图集的封面均探测到 JPEG，域名未登记 | 待验证 |
 | 快手 | 待验证 | 待验证 | 待验证 | 待验证 |
-| B 站 | 待验证，仅第 1P 和单文件 MP4 | 首版不支持 | 待验证 | 待验证（标题） |
+| B 站 | 第 1P 通过魔数识别为 MP4，按 `relay_only` 处理 | 首版不支持 | 第 1P 探测到 PNG，域名未登记 | 待验证（标题） |
 
 每个拟开放的“平台 × 内容类型”按 T02 收集至少 20 个有权使用的样本。B 站另测多 P 视频：未指定 P 和 `p=1` 应尝试解析，`p=2` 应拒绝。图集记录 `imagesAndVideo` 是否同时为真；实况图记录是否正确降级。
 
@@ -21,7 +21,18 @@
 | 2026-11-18 / Windows CLI | 抖音 / 图集候选（DY-G1 至 G3） | 3 条中 1 条解析出 9 张图。`imagesAndVideo=true`，正文使用图集，附独立封面。该样本通过 iteminfo 取得图集 | 2 条 `UPSTREAM_UNAVAILABLE`。9 张图和封面均为 WebP，直连探测为 `UNSUPPORTED_MIME` | `douyin-h5-iteminfo-v1` | 未测 |
 | 2026-11-18 / Windows CLI | 小红书 / 内容类型未确认 | 4 条短链、4 条带签名的作品链接，均未取得媒体 | `UPSTREAM_UNAVAILABLE`，尚未进入媒体探测 | 锁定解析库 | 未测 |
 
-抖音视频和图集于北京时间 17:29 与 17:35 各跑一轮。第二轮 DY-V3 仍探测到 MP4，DY-G1 仍返回 9 张图和封面。首轮探测到 MP4 的 DY-V2 在第二轮返回 `UPSTREAM_UNAVAILABLE`。
+抖音第一次复测于北京时间 17:29 与 17:35 各跑一轮。第二轮 DY-V3 仍探测到 MP4，DY-G1 仍返回 9 张图和封面。首轮探测到 MP4 的 DY-V2 在第二轮返回 `UPSTREAM_UNAVAILABLE`。
+
+2026-11-18 北京时间 18:06 至 18:07，Windows CLI 从 `testdata/live_samples.local.json` 读取样本。`TestLiveSamples` 的 8 条断言样本全部通过，且单独运行 `probe` 复测了新样本。样本编号对应本地文件中的顺序。
+
+| 样本 | 探测结果 | 限制与波动 |
+| --- | --- | --- |
+| 5 小红书图集 | `probe` 最后一次和通过的 live 测试均探测到 6 张 JPEG，另有 1 张 JPEG 封面。`imagesAndVideo=false` | 前几轮部分正文收到 `206` 和 `Content-Range`，但未读到文件头，记为 `UNSUPPORTED_MIME`。域名未登记 |
+| 6 小红书视频 | 探测到 MP4 和 JPEG 封面 | 早期运行中封面返回 `application/octet-stream`，有一次未识别。域名未登记 |
+| 7 抖音视频 | 探测到 1 个 MP4 和 WebP 封面 | 曾返回 `UPSTREAM_UNAVAILABLE`。MP4 域名未登记，WebP 封面需走转换 |
+| 8 抖音图集 | 探测到 18 张 JPEG 和 WebP 封面。`imagesAndVideo=true` | 短链终点曾返回 HEAD 444，但已取得作品 ID。独立的 H5 iteminfo 成功运行，也曾出现 `UPSTREAM_UNAVAILABLE`。JPEG 域名未登记 |
+| 12 抖音图集（DY-G1） | 与上一版相同作品的 9 张正文图由 WebP 改选为 JPEG，封面仍为 WebP。`imagesAndVideo=true` | JPEG 域名未登记，WebP 封面需走转换 |
+| 3 B 站第 1P | 响应声明 `application/octet-stream`，读文件头识别为 MP4。封面仍为 PNG | 视频按 `RELAY_ONLY` 处理，中转待测 |
 
 | 最终 CDN 主机 | 平台 | 观测数 / MIME | 登记状态 | iOS / Android 下载、预览与保存结论 |
 | --- | --- | --- | --- | --- |
@@ -34,8 +45,19 @@
 | p26-sign.douyinpic.com | 抖音 | 9 / image/webp（7 张正文，2 张封面） | 未登记 | 直连探测拒绝，转换与真机保存待测 |
 | p11-sign.douyinpic.com | 抖音 | 3 / image/webp（2 张正文，1 张封面） | 未登记 | 直连探测拒绝，转换与真机保存待测 |
 
-离线回归验证了视频、图集和封面候选的 HTTP → HTTPS 改写，主机、路径及原始签名参数保持不变。小红书短链和带签名的作品链接各抽查一条，锁定解析库均未能从返回页面提取笔记数据。本批次没有小红书 CDN 可访问性结论。
+最新一轮观测到的新增主机和 JPEG 数量如下。域名均未登记，iOS 与 Android 下载、预览和相册保存均未测。
 
-B 站样本是 Blender Foundation 的 *Big Buck Bunny*（Peach 项目许可：CC BY 3.0）。其余探测只用了公开技术报告或项目文档中用于复现的链接，只读取元数据与响应头，未下载或保存媒体。这些探测不计入有授权的下载样本数，也不用于推算平台成功率。
+| 最终 CDN 主机 | 平台 | 格式与观测 |
+| --- | --- | --- |
+| v5-se-bd-daily-cold.douyinvod.com | 抖音 | 1 个 MP4 |
+| p5-ex-gddgtc-sign.douyinpic.com | 抖音 | 6 张正文 JPEG |
+| p9-sign.douyinpic.com | 抖音 | 3 张正文 JPEG |
+| p11-sign.douyinpic.com | 抖音 | 4 张正文 JPEG，1 张 WebP 封面 |
+| p26-sign.douyinpic.com | 抖音 | 14 张正文 JPEG，2 张 WebP 封面 |
+| sns-webpic-qc.xhscdn.com | 小红书 | 6 张正文 JPEG，2 张 JPEG 封面 |
+| sns-video-v4.xhscdn.com、sns-video-v3.xhscdn.com | 小红书 | 同一视频在不同轮次探测到 MP4 |
+| upos-sz-estgcos.bilivideo.com、upos-sz-mirrorcos.bilivideo.com | B 站 | 同一视频在不同轮次通过魔数识别为 MP4 |
+
+B 站样本是 Blender Foundation 的 *Big Buck Bunny*（Peach 项目许可 CC BY 3.0）。其余探测使用本地样本及公开复现链接。探测只访问元数据和响应头，必要时最多读取 12 字节文件头。这些探测尚未计入授权下载样本数或平台成功率。历史复现链接已补进本地文件，标记 `probeOnly` 的链接在 live 测试中保留观测结果。
 
 汇总只写样本编号和最终主机，不写源 URL、签名或 Cookie。真机验证需开启正式域名校验。确认前保持能力和直连预览关闭；B 站视频继续按 `relay_only` 验证。

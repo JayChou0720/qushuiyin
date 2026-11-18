@@ -19,7 +19,10 @@ func TestLiveSamples(t *testing.T) {
 	if e != nil {
 		t.Fatal("cannot read sample file")
 	}
-	var samples []struct{ URL, Platform, MediaType, Error string }
+	var samples []struct {
+		URL, Platform, MediaType, Error string
+		ProbeOnly                       bool
+	}
 	if json.Unmarshal(b, &samples) != nil || len(samples) == 0 {
 		t.Fatal("invalid sample file")
 	}
@@ -36,6 +39,16 @@ func TestLiveSamples(t *testing.T) {
 			}
 			return ""
 		}, &out)
+		// Previously observed public samples may expire. Keep them available
+		// for reproduction without asserting that their upstream status is fixed.
+		if s.ProbeOnly {
+			if e != nil {
+				t.Logf("sample %d (probe only): %v", i+1, e)
+			} else {
+				t.Logf("sample %d (probe only): %s", i+1, out.String())
+			}
+			continue
+		}
 		if e != nil {
 			if e.Error() != s.Error {
 				t.Errorf("sample %d: %v", i+1, e)

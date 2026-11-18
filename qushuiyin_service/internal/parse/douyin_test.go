@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -34,7 +35,7 @@ func liveDouyinFixture(t *testing.T, transport coverTransport) Adapter {
 func TestDouyinH5VideoAndGallery(t *testing.T) {
 	const pageURL = shareOrigin + "/share/video/123/"
 	const video = `"video":{"play_addr":{"url_list":["http://cdn.example.test/playwm/v%2F1?sig=playwm%2f+x&sig=2"]},"cover":{"url_list":["http://cdn.example.test/cover?sig=%2f+x"]}}`
-	const gallery = `,"images":[{"url_list":["http://cdn.example.test/i%2f1?a=1&a=2+3","https://cdn.example.test/ignored"]},{"url_list":["https://cdn.example.test/i2"]}]`
+	const gallery = `,"images":[{"url_list":["https://cdn.example.test/i1.webp?format=.jpg","http://cdn.example.test/i%2f1.JPEG?a=1&a=2+3","http://cdn.example.test/i1.png","https://cdn.example.test/i1.webp?format=.jpg","http://127.0.0.1/i1.jpg"]},{"url_list":["https://cdn.example.test/i2.webp","https://cdn.example.test/i2.png"]}]`
 	for _, test := range []struct {
 		name, input, kind string
 		images            string
@@ -42,7 +43,7 @@ func TestDouyinH5VideoAndGallery(t *testing.T) {
 		content           []string
 	}{
 		{"short video", "https://v.douyin.com/sample/", "video", "", "HHGG", []string{"https://cdn.example.test/play/v%2F1?sig=playwm%2f+x&sig=2"}},
-		{"direct mixed gallery", "https://www.douyin.com/note/123", "image", gallery, "GG", []string{"https://cdn.example.test/i%2f1?a=1&a=2+3", "https://cdn.example.test/i2"}},
+		{"direct mixed gallery", "https://www.douyin.com/note/123", "image", gallery, "GG", []string{"https://cdn.example.test/i%2f1.JPEG?a=1&a=2+3", "https://cdn.example.test/i2.webp"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			run := 0
@@ -56,7 +57,7 @@ func TestDouyinH5VideoAndGallery(t *testing.T) {
 					resp.Header.Set("Set-Cookie", "ttwid=short-link; Path=/")
 					return resp, nil
 				case req.URL.Host == "www.douyin.com" && req.Method == http.MethodHead:
-					return h5Response(200, ""), nil
+					return h5Response(444, ""), nil
 				case req.URL.String() == pageURL && req.Method == http.MethodGet:
 					if req.Header.Get("Cookie") != "" || req.Header.Get("Referer") != "" || !strings.Contains(req.UserAgent(), "Mobile") {
 						t.Fatal("unexpected sharing-page headers")
@@ -106,6 +107,12 @@ func TestDouyinH5VideoAndGallery(t *testing.T) {
 				for i, want := range test.content {
 					if r.Assets[i].Source != want || r.Assets[i].Order != i+1 {
 						t.Errorf("incorrect content asset %+v", r.Assets[i])
+					}
+				}
+				if test.kind == "image" {
+					if !slices.Equal(r.Assets[0].Alternates, []string{"https://cdn.example.test/i1.webp?format=.jpg", "https://cdn.example.test/i1.png"}) ||
+						!slices.Equal(r.Assets[1].Alternates, []string{"https://cdn.example.test/i2.png"}) {
+						t.Fatal("gallery alternatives differ from the valid remaining addresses in upstream order")
 					}
 				}
 				if r.Cover == nil || r.Cover.Source != "https://cdn.example.test/cover?sig=%2f+x" {
