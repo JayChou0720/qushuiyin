@@ -85,9 +85,7 @@ func (s *Mock) submitFeedback(w http.ResponseWriter, r *http.Request, c credenti
 	req.Content = strings.TrimSpace(req.Content)
 	req.Contact = strings.TrimSpace(req.Contact)
 	length := int64(utf8.RuneCountInString(req.Content))
-	switch req.Category {
-	case "parse_failed", "download_failed", "album_failed", "gallery_issue", "suggestion", "other":
-	default:
+	if !feedbackCategory(req.Category) {
 		fail(w, 400, "BAD_REQUEST")
 		return
 	}

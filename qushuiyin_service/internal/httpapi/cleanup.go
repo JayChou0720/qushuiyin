@@ -172,6 +172,7 @@ func (s *Mock) cleanDatabase(ctx context.Context, now time.Time) {
 		{"DELETE FROM feedback WHERE expires_at<=? ORDER BY expires_at LIMIT ?", now},
 		{"DELETE FROM event_ingest WHERE received_at<=? ORDER BY received_at LIMIT ?", now.AddDate(0, 0, -int(s.Settings.Int("diagnostic_retention_days")))},
 		{"DELETE FROM idempotency_record WHERE expires_at<=? ORDER BY expires_at LIMIT ?", now},
+		{"DELETE FROM admin_audit WHERE created_at<=? ORDER BY created_at LIMIT ?", now.AddDate(0, 0, -int(s.Settings.Int("admin_audit_retention_days")))},
 	} {
 		if _, err = db.ExecContext(ctx, q.query, q.cutoff, limit); err != nil {
 			slog.Warn("local data retention sweep failed")

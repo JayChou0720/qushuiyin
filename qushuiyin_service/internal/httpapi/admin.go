@@ -93,10 +93,24 @@ func (s *Mock) withAdmin(next func(http.ResponseWriter, *http.Request, auth.Admi
 		next(w, r, a, cookie.Value)
 	})
 }
+func (s *Mock) adminRole(next func(http.ResponseWriter, *http.Request, auth.Admin), roles ...string) http.HandlerFunc {
+	return s.withAdmin(func(w http.ResponseWriter, r *http.Request, a auth.Admin, _ string) {
+		if !oneOf(a.Role, roles...) {
+			fail(w, 403, "ACCESS_DENIED")
+			return
+		}
+		next(w, r, a)
+	})
+}
+
 func (s *Mock) adminRoutes(m *http.ServeMux) {
 	s.adminHashSlots = make(chan struct{}, 4)
 	m.HandleFunc("POST /admin/v1/sessions", s.adminGuard(s.adminLogin))
 	m.HandleFunc("GET /admin/v1/me", s.withAdmin(func(w http.ResponseWriter, _ *http.Request, a auth.Admin, _ string) { ok(w, 200, a) }))
+	m.HandleFunc("GET /admin/v1/feedbacks", s.adminRole(s.adminFeedbackList, "super_admin", "operator", "support"))
+	m.HandleFunc("GET /admin/v1/feedbacks/{id}", s.adminRole(s.adminFeedbackDetail, "super_admin", "operator", "support"))
+	m.HandleFunc("PATCH /admin/v1/feedbacks/{id}", s.adminRole(s.adminFeedbackUpdate, "super_admin", "operator", "support"))
+	m.HandleFunc("GET /admin/v1/audit-logs", s.adminRole(s.adminAuditList, "super_admin", "auditor"))
 	m.HandleFunc("DELETE /admin/v1/sessions/current", s.withAdmin(func(w http.ResponseWriter, r *http.Request, _ auth.Admin, token string) {
 		if err := s.Admin.Revoke(r.Context(), token); err != nil {
 			fail(w, 503, "SERVICE_BUSY")

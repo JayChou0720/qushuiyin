@@ -78,6 +78,10 @@ func messageFor(code string) string {
 	switch code {
 	case "DAILY_LIMIT_REACHED":
 		return "今日操作次数已达上限，请稍后再试"
+	case "VERSION_CONFLICT":
+		return "记录已更新，请刷新后重试"
+	case "FEEDBACK_CLOSED":
+		return "该工单已关闭"
 	case "PREPARE_TIMEOUT":
 		return "文件准备超时"
 	case "MEDIA_SOURCE_EXPIRED":
@@ -101,8 +105,7 @@ func messageFor(code string) string {
 func send(w http.ResponseWriter, status int, code string, data, details any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	rid := auth.ID()
-	w.Header().Set("X-Request-Id", rid)
+	rid := requestID(w)
 	res := envelope{Code: code, Message: messageFor(code), RequestID: rid, Data: data}
 	if code != "OK" {
 		res.Error = dto{"retryable": status == 429 || status >= 500, "details": details}
@@ -112,6 +115,14 @@ func send(w http.ResponseWriter, status int, code string, data, details any) {
 }
 func ok(w http.ResponseWriter, status int, data any)      { send(w, status, "OK", data, nil) }
 func fail(w http.ResponseWriter, status int, code string) { send(w, status, code, nil, nil) }
+func requestID(w http.ResponseWriter) string {
+	id := w.Header().Get("X-Request-Id")
+	if id == "" {
+		id = auth.ID()
+		w.Header().Set("X-Request-Id", id)
+	}
+	return id
+}
 func (s *Mock) read(w http.ResponseWriter, r *http.Request, into any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, s.Settings.Int("max_request_body_bytes"))
 	d := json.NewDecoder(r.Body)

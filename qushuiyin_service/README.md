@@ -23,6 +23,8 @@ node ./qushuiyin_service/scripts/smoke-mock.mjs
 
 管理员账号与小程序账号分开。设置本机 `MYSQL_DSN` 并迁移后，用 `qushuiyin-server admin create --username ops --role super_admin` 创建首个管理员；终端会要求两次不回显的密码输入。管理会话仅通过 `/admin` 路径的安全 Cookie 签发，修改请求校验 `Origin`。管理员接口的 MySQL 集成测试使用 `MYSQL_TEST_DSN`，只对本地 `qushuiyin_test` 运行。
 
+客服、运营和超级管理员可筛选 `GET /admin/v1/feedbacks?status=pending&category=download_failed`，或访问工单详情。修改工单提交 `{expectedVersion,status?,reply?,reason}`，原因不要填写用户的链接或联系方式。工单关闭后按配置缩短保留期；仅超级管理员和审计角色可用 `GET /admin/v1/audit-logs?targetType=feedback&targetId=...` 查看脱敏审计。`go test -run TestAdminFeedbackMySQL ./internal/httpapi` 验证接口权限与回复流程。
+
 同一个接口脚本还使用独立的开发身份验证反馈、事件和数据清理。反馈链接只在明确附带时接受；反馈与事件写入本地 MySQL。Mock 事件暂用以下值：`stage` 为 `result/preview/save/download/album`，`outcome` 为 `started/succeeded/failed/cancelled/partial/unknown`，`osFamily` 为 `ios/android/windows/macos/devtools/unknown`。重复事件按用户与事件 ID 判定；本人失败解析可用 `error.traceId` 关联反馈。
 
 清理请求撤销本地开发用户的会话和票据，并记录可在重启后继续处理的任务；共用的合成样本不受影响。`go test -run TestMockPrivacyMySQL ./internal/httpapi` 使用隔离测试库验证删除边界。该测试不覆盖真实媒体文件和备份恢复。
