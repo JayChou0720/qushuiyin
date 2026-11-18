@@ -35,7 +35,7 @@ When behaviour changes, update the functional rule, API contract, config and tes
 
 V1 platforms: Douyin, Xiaohongshu and Kuaishou (video + image sets) and Bilibili (video only: low-quality single-file MP4, first part only). Bilibili HD (DASH + FFmpeg merge) and yt-dlp as a second source are P1. No platform account cookies in V1.
 
-Target server: 2 cores / 2 GB / 50 GB SSD with MySQL on the same box (tuning and memory estimate in spec §19.2). Bandwidth is sized by relay traffic, not total downloads. Local toolchain: MySQL 8.4, Node 24 and WeChat DevTools are installed. Go (≥ 1.26.10, required by parse-video) and FFmpeg/ffprobe are **not** installed yet (owner step H3).
+Target server: 2 cores / 2 GB / 50 GB SSD with MySQL on the same box (tuning and memory estimate in spec §19.2). Bandwidth is sized by relay traffic, not total downloads. Local toolchain: MySQL 8.4, Node 24 and WeChat DevTools are installed. Go 1.27.4 is at `D:\Go` (GOPROXY=https://goproxy.cn,direct) and FFmpeg 9.0.2 with ffprobe at `D:\FFmpegin`; both are on the user PATH (H3 done; new shells/agents must be restarted to see PATH). Windows Smart App Control is off so unsigned Go binaries can run.
 
 ## Rules for the parse-video dependency (spec §12.1)
 
