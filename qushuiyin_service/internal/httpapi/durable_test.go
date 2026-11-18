@@ -162,6 +162,22 @@ func TestDurableTasksMySQL(t *testing.T) {
 	if ready["status"] != "READY" {
 		t.Fatalf("batch not durable: %v", ready)
 	}
+	var before, after int64
+	const versionQuery = "SELECT version FROM save_batch WHERE id=? AND user_id=?"
+	if err = db.QueryRow(versionQuery, bid, login.UserID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	request(last, "GET", "/v1/save-batches/"+bid, "", "", 200)
+	if err = db.QueryRow(versionQuery, bid, login.UserID).Scan(&after); err != nil || after != before {
+		t.Fatal("polling rewrote the batch", before, after, err)
+	}
+	// Cancelling another batch must not touch this one.
+	payload, _ = json.Marshal(dto{"resultId": rid, "assetIds": []string{aid}, "clientActionId": auth.ID(), "flowId": "durable-test"})
+	other := request(last, "POST", "/v1/save-batches", auth.ID(), string(payload), 202)["batchId"].(string)
+	request(last, "DELETE", "/v1/save-batches/"+other, "", "", 200)
+	if err = db.QueryRow(versionQuery, bid, login.UserID).Scan(&after); err != nil || after != before {
+		t.Fatal("operation rewrote an unrelated batch", before, after, err)
+	}
 	// A cancelled job cannot create a result even if the old resolver succeeds.
 	second := request(rh, "POST", "/v1/parse-jobs", auth.ID(), body, 202)["jobId"].(string)
 	claim, err := restarted.claimParse(ctx, "cancel-race")

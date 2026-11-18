@@ -75,10 +75,14 @@ func (s *Mock) prepare(b *batch, x *item, now time.Time) {
 	x.AvailableUntil = minTime(b.ExpiresAt, now.Add(ttl))
 }
 
-func (s *Mock) canPrepare(w http.ResponseWriter, b *batch, now time.Time) bool {
-	res := s.results[b.ResultID]
+func (s *Mock) canPrepare(w http.ResponseWriter, r *http.Request, b *batch, now time.Time) bool {
+	expires, err := s.batchResultExpiry(r.Context(), b.User, b.ResultID)
+	if err != nil {
+		fail(w, 503, "SERVICE_BUSY")
+		return false
+	}
 	budget := s.Settings.Seconds("batch_prepare_timeout_seconds") + s.downloadBudget()
-	if res == nil || res.ExpiresAt.Sub(now) < budget {
+	if expires.Sub(now) < budget {
 		fail(w, 410, "RESULT_EXPIRED")
 		return false
 	}
@@ -87,13 +91,8 @@ func (s *Mock) canPrepare(w http.ResponseWriter, b *batch, now time.Time) bool {
 		return false
 	}
 	if b.Status != "PREPARING" {
-		n := int64(0)
-		for _, v := range s.batches {
-			if v.User == b.User && v.Status == "PREPARING" && now.Before(v.ExpiresAt) {
-				n++
-			}
-		}
-		if n >= s.Settings.Int("user_active_save_batches") {
+		n, _, err := s.batchCapacity(r.Context(), b.User, "", now)
+		if err != nil || n >= s.Settings.Int("user_active_save_batches") {
 			fail(w, 503, "SERVICE_BUSY")
 			return false
 		}
@@ -117,15 +116,15 @@ func (s *Mock) retryBatch(w http.ResponseWriter, r *http.Request, c credential) 
 		fail(w, 400, "BAD_REQUEST")
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	b := s.ownedBatch(w, r, c)
+	state, unlock := s.batchState(r)
+	defer unlock()
+	b := state.ownedBatch(w, r, c)
 	if b == nil {
 		return
 	}
 	now := time.Now().UTC()
-	s.prune(now)
-	key, replay, proceed := s.replay(w, r, c, "batch-retry", []any{b.ID, req}, now)
+	s.pruneMockBatches(now)
+	key, replay, proceed := s.replayWithKeys(w, r, c, "batch-retry", []any{b.ID, req}, now, state.keys)
 	if !proceed {
 		return
 	}
@@ -166,7 +165,7 @@ func (s *Mock) retryBatch(w http.ResponseWriter, r *http.Request, c credential) 
 		}
 		chosen = append(chosen, x)
 	}
-	if !s.canPrepare(w, b, now) {
+	if !s.canPrepare(w, r, b, now) {
 		return
 	}
 	for _, x := range chosen {
@@ -174,7 +173,7 @@ func (s *Mock) retryBatch(w http.ResponseWriter, r *http.Request, c credential) 
 	}
 	b.aggregate()
 	replay.ID = b.ID
-	s.keys[key] = replay
+	state.keys[key] = replay
 	s.batchAccepted(w, b)
 }
 func (s *Mock) fallbackItem(w http.ResponseWriter, r *http.Request, c credential) {
@@ -186,9 +185,9 @@ func (s *Mock) fallbackItem(w http.ResponseWriter, r *http.Request, c credential
 		fail(w, 400, "BAD_REQUEST")
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	b := s.ownedBatch(w, r, c)
+	state, unlock := s.batchState(r)
+	defer unlock()
+	b := state.ownedBatch(w, r, c)
 	if b == nil {
 		return
 	}
@@ -198,8 +197,8 @@ func (s *Mock) fallbackItem(w http.ResponseWriter, r *http.Request, c credential
 		return
 	}
 	now := time.Now().UTC()
-	s.prune(now)
-	key, replay, proceed := s.replay(w, r, c, "batch-fallback", []any{b.ID, x.ID, req}, now)
+	s.pruneMockBatches(now)
+	key, replay, proceed := s.replayWithKeys(w, r, c, "batch-fallback", []any{b.ID, x.ID, req}, now, state.keys)
 	if !proceed {
 		return
 	}
@@ -212,7 +211,7 @@ func (s *Mock) fallbackItem(w http.ResponseWriter, r *http.Request, c credential
 		fail(w, 409, "FALLBACK_NOT_ALLOWED")
 		return
 	}
-	if !s.canPrepare(w, b, now) {
+	if !s.canPrepare(w, r, b, now) {
 		return
 	}
 	x.Fallback = true
@@ -220,7 +219,7 @@ func (s *Mock) fallbackItem(w http.ResponseWriter, r *http.Request, c credential
 	s.requeue(b, x, now)
 	b.aggregate()
 	replay.ID = b.ID
-	s.keys[key] = replay
+	state.keys[key] = replay
 	s.batchAccepted(w, b)
 }
 func (b *batch) findItem(id string) *item {
@@ -232,9 +231,9 @@ func (b *batch) findItem(id string) *item {
 	return nil
 }
 func (s *Mock) copyLink(w http.ResponseWriter, r *http.Request, c credential) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	b := s.ownedBatch(w, r, c)
+	state, unlock := s.batchState(r)
+	defer unlock()
+	b := state.ownedBatch(w, r, c)
 	if b == nil {
 		return
 	}
@@ -252,7 +251,7 @@ func (s *Mock) copyLink(w http.ResponseWriter, r *http.Request, c credential) {
 		fail(w, 410, "MEDIA_SOURCE_EXPIRED")
 		return
 	}
-	if !s.minute("ticket:"+c.User, s.Settings.Int("user_download_url_requests_per_minute")) || s.Relay == nil && !s.rate("copy:"+c.User, s.Settings.Int("user_copy_link_per_day"), 24*time.Hour) {
+	if !s.batchURLRate(c.User) || s.Relay == nil && !s.batchCopyRate(c.User) {
 		fail(w, 429, "RATE_LIMITED")
 		return
 	}

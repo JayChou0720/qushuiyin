@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -351,9 +352,66 @@ func (s *Mock) saveDirect(ctx context.Context, tx *sql.Tx, user string, x item) 
 type hostWindow struct {
 	Until            time.Time
 	Issued, Fallback int64
+	pending          bool
 }
 
 var errCopyQuota = errors.New("copy quota exceeded")
+
+// Serialize only signals for the same CDN host. Keep the in-memory window
+// aligned with committed updates without holding the shared map lock during SQL.
+func (s *Mock) lockHostWindows(signals []item) (map[string]hostWindow, func()) {
+	var hosts []string
+	for _, x := range signals {
+		if x.DirectHost != "" && (x.DirectIssuedPending > 0 || x.FallbackPending) {
+			hosts = append(hosts, x.DirectHost)
+		}
+	}
+	slices.Sort(hosts)
+	hosts = slices.Compact(hosts)
+	windows := make(map[string]hostWindow, len(hosts))
+	unlocks := make([]func(), 0, len(hosts))
+	for _, host := range hosts {
+		unlocks = append(unlocks, s.hostGates.lock(host))
+	}
+
+	s.mu.Lock()
+	now := time.Now()
+	limit := s.Settings.Int("memory_rate_limit_max_subjects")
+	if int64(len(s.hostWindows)+len(hosts)) > limit {
+		for host, w := range s.hostWindows {
+			if !w.pending && !now.Before(w.Until) {
+				delete(s.hostWindows, host)
+			}
+		}
+	}
+	for _, host := range hosts {
+		w, ok := s.hostWindows[host]
+		if !ok && int64(len(s.hostWindows)) >= limit {
+			continue
+		}
+		windows[host] = w
+		w.pending = true
+		s.hostWindows[host] = w
+	}
+	s.mu.Unlock()
+
+	return windows, func() {
+		s.mu.Lock()
+		for host := range windows {
+			w := s.hostWindows[host]
+			w.pending = false
+			if w.Until.IsZero() {
+				delete(s.hostWindows, host)
+			} else {
+				s.hostWindows[host] = w
+			}
+		}
+		s.mu.Unlock()
+		for _, unlock := range unlocks {
+			unlock()
+		}
+	}
+}
 
 func (s *Mock) commitDeliverySignals(ctx context.Context, tx *sql.Tx, b *batch, x item, windows map[string]hostWindow) error {
 	var platform string
@@ -395,18 +453,11 @@ func (s *Mock) commitDeliverySignals(ctx context.Context, tx *sql.Tx, b *batch, 
 	if x.DirectHost == "" || x.DirectIssuedPending == 0 && !x.FallbackPending {
 		return nil
 	}
-	w := windows[x.DirectHost]
+	w, ok := windows[x.DirectHost]
+	if !ok {
+		return errors.New("domain window capacity")
+	}
 	if !time.Now().Before(w.Until) {
-		if int64(len(windows)) >= s.Settings.Int("memory_rate_limit_max_subjects") {
-			for h, v := range windows {
-				if !time.Now().Before(v.Until) {
-					delete(windows, h)
-				}
-			}
-			if int64(len(windows)) >= s.Settings.Int("memory_rate_limit_max_subjects") {
-				return errors.New("domain window capacity")
-			}
-		}
 		w = hostWindow{Until: time.Now().Add(s.Settings.Seconds("direct_host_review_window_seconds"))}
 	}
 	falls := int64(0)

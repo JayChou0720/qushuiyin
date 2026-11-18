@@ -56,33 +56,27 @@ func (s *Mock) createBatch(w http.ResponseWriter, r *http.Request, c credential)
 		return
 	}
 	now := time.Now().UTC()
-	if s.Persistent {
-		res, err := s.loadPersistentResult(r.Context(), c.User, req.ResultID)
-		if err != nil {
-			fail(w, 404, "RESOURCE_NOT_FOUND")
-			return
-		}
-		s.mu.Lock()
-		s.results[res.ID] = res.result
-		s.mu.Unlock()
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.prune(now)
-	key, replay, proceed := s.replay(w, r, c, "prepare", req, now)
+	state, unlock := s.batchState(r)
+	defer unlock()
+	s.pruneMockBatches(now)
+	key, replay, proceed := s.replayWithKeys(w, r, c, "prepare", req, now, state.keys)
 	if !proceed {
 		return
 	}
 	if replay.ID != "" {
-		b := s.batches[replay.ID]
-		if b == nil {
+		b := state.batches[replay.ID]
+		if b == nil || !now.Before(b.ExpiresAt) {
 			fail(w, 410, "BATCH_EXPIRED")
 			return
 		}
 		s.batchAccepted(w, b)
 		return
 	}
-	res := s.results[req.ResultID]
+	res, err := s.batchResult(r.Context(), c.User, req.ResultID)
+	if err != nil {
+		fail(w, 503, "SERVICE_BUSY")
+		return
+	}
 	if res == nil || res.User != c.User {
 		fail(w, 404, "RESOURCE_NOT_FOUND")
 		return
@@ -92,21 +86,20 @@ func (s *Mock) createBatch(w http.ResponseWriter, r *http.Request, c credential)
 		fail(w, 410, "RESULT_EXPIRED")
 		return
 	}
-	if int64(len(s.batches)) >= s.Settings.Int("memory_parse_cache_max_entries") {
+	if int64(len(state.batches)) >= s.Settings.Int("memory_parse_cache_max_entries") {
 		fail(w, 503, "SERVICE_BUSY")
 		return
 	}
-	active := 0
-	for _, b := range s.batches {
-		if b.User == c.User && b.ClientActionID == req.ClientActionID {
-			fail(w, 409, "IDEMPOTENCY_CONFLICT")
-			return
-		}
-		if b.User == c.User && b.Status == "PREPARING" {
-			active++
-		}
+	active, duplicate, err := s.batchCapacity(r.Context(), c.User, req.ClientActionID, now)
+	if err != nil {
+		fail(w, 503, "SERVICE_BUSY")
+		return
 	}
-	if int64(active) >= s.Settings.Int("user_active_save_batches") {
+	if duplicate {
+		fail(w, 409, "IDEMPOTENCY_CONFLICT")
+		return
+	}
+	if active >= s.Settings.Int("user_active_save_batches") {
 		fail(w, 503, "SERVICE_BUSY")
 		return
 	}
@@ -132,9 +125,9 @@ func (s *Mock) createBatch(w http.ResponseWriter, r *http.Request, c credential)
 		b.Items = append(b.Items, item{ID: auth.ID(), Asset: a, Status: "PREPARING", Attempt: 1, Deadline: minTime(b.ExpiresAt, now.Add(s.Settings.Seconds("batch_prepare_timeout_seconds")))})
 	}
 	sort.Slice(b.Items, func(i, j int) bool { return b.Items[i].Asset.Order < b.Items[j].Asset.Order })
-	s.batches[b.ID] = b
+	state.batches[b.ID] = b
 	replay.ID = b.ID
-	s.keys[key] = replay
+	state.keys[key] = replay
 	s.batchAccepted(w, b)
 }
 func minTime(a, b time.Time) time.Time {
@@ -146,8 +139,8 @@ func minTime(a, b time.Time) time.Time {
 func (s *Mock) batchAccepted(w http.ResponseWriter, b *batch) {
 	ok(w, 202, dto{"batchId": b.ID, "status": b.Status, "pollAfterMs": s.Settings.Int("poll_interval_ms"), "expiresAt": b.ExpiresAt})
 }
-func (s *Mock) ownedBatch(w http.ResponseWriter, r *http.Request, c credential) *batch {
-	b := s.batches[r.PathValue("batchId")]
+func (state batchRequestState) ownedBatch(w http.ResponseWriter, r *http.Request, c credential) *batch {
+	b := state.batches[r.PathValue("batchId")]
 	if b == nil || b.User != c.User {
 		fail(w, 404, "RESOURCE_NOT_FOUND")
 		return nil
@@ -159,9 +152,9 @@ func (s *Mock) ownedBatch(w http.ResponseWriter, r *http.Request, c credential) 
 	return b
 }
 func (s *Mock) batchStatus(w http.ResponseWriter, r *http.Request, c credential) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	b := s.ownedBatch(w, r, c)
+	state, unlock := s.batchState(r)
+	defer unlock()
+	b := state.ownedBatch(w, r, c)
 	if b == nil {
 		return
 	}
@@ -219,9 +212,9 @@ func (s *Mock) tickets(w http.ResponseWriter, r *http.Request, c credential) {
 		fail(w, 400, "BAD_REQUEST")
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	b := s.ownedBatch(w, r, c)
+	state, unlock := s.batchState(r)
+	defer unlock()
+	b := state.ownedBatch(w, r, c)
 	if b == nil {
 		return
 	}
@@ -229,7 +222,7 @@ func (s *Mock) tickets(w http.ResponseWriter, r *http.Request, c credential) {
 		fail(w, 409, "FILE_NOT_READY")
 		return
 	}
-	if !s.minute("ticket:"+c.User, s.Settings.Int("user_download_url_requests_per_minute")) {
+	if !s.batchURLRate(c.User) {
 		fail(w, 429, "RATE_LIMITED")
 		return
 	}
@@ -331,18 +324,18 @@ func (s *Mock) download(mode string) http.HandlerFunc {
 			s.relayDownload(w, r, uid, bid, oid)
 			return
 		}
+		var b *batch
 		if s.Persistent {
-			s.persistentGate.Lock()
-			err = s.loadBatches(r.Context(), uid)
-			s.persistentGate.Unlock()
+			b, err = s.loadBatch(r.Context(), uid, bid, false)
 			if err != nil {
 				fail(w, 503, "SERVICE_BUSY")
 				return
 			}
+		} else {
+			s.mu.Lock()
+			b = s.batches[bid]
 		}
-		s.mu.Lock()
 		kind := ""
-		b := s.batches[bid]
 		if b != nil && b.User == uid && !b.Cancelled && time.Now().Before(b.ExpiresAt) {
 			for _, i := range b.Items {
 				valid := (i.Status == "READY" && mode == i.Mode) || (mode == "copy" && i.Status == "FAILED" && i.CopyAvailable)
@@ -352,7 +345,9 @@ func (s *Mock) download(mode string) http.HandlerFunc {
 				}
 			}
 		}
-		s.mu.Unlock()
+		if !s.Persistent {
+			s.mu.Unlock()
+		}
 		if kind == "" {
 			fail(w, 404, "RESOURCE_NOT_FOUND")
 			return

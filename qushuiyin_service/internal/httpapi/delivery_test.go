@@ -198,7 +198,7 @@ func TestDeliveryDirectFallbackMySQL(t *testing.T) {
 	if e := h.db.QueryRow("SELECT direct_url_enc FROM save_batch_item WHERE id=?", i).Scan(&enc); e != nil || strings.Contains(enc, "private-test") {
 		t.Fatal("direct address not encrypted", e)
 	}
-	if e := h.s.loadBatches(t.Context(), h.user); e != nil || h.s.batches[b].findItem(i).DirectURL != address {
+	if loaded, e := h.s.loadBatch(t.Context(), h.user, b, true); e != nil || loaded == nil || loaded.findItem(i).DirectURL != address {
 		t.Fatal("restart lost encrypted direct address", e)
 	}
 	path := "/v1/save-batches/" + b + "/items/" + i + "/fallback"

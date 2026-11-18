@@ -33,7 +33,8 @@ type Mock struct {
 	hostWindows      map[string]hostWindow
 	Persistent       bool
 	AdapterTag       string
-	persistentGate   sync.Mutex
+	batchGates       keyedMutex
+	hostGates        keyedMutex
 	TaskKeys         map[string][]byte
 	TaskKeyVersion   string
 	Relay            *media.Relay
@@ -176,10 +177,6 @@ func (s *Mock) authorized(next authed) http.HandlerFunc {
 			fail(w, 503, "SERVICE_BUSY")
 			return
 		}
-		if s.Persistent && (r.URL.Path == "/v1/save-batches" || strings.HasPrefix(r.URL.Path, "/v1/save-batches/")) {
-			s.persistentBatchRequest(w, r, c, next)
-			return
-		}
 		next(w, r, c)
 	}
 }
@@ -290,13 +287,13 @@ func (s *Mock) Handler(ctx context.Context) http.Handler {
 	m.HandleFunc("DELETE /v1/parse-jobs/{jobId}", s.authorized(s.jobStatus))
 	m.HandleFunc("GET /v1/results/{resultId}", s.authorized(s.resultData))
 	m.HandleFunc("POST /v1/results/{resultId}/preview-tickets", s.authorized(s.previewTickets))
-	m.HandleFunc("POST /v1/save-batches", s.authorized(s.createBatch))
-	m.HandleFunc("GET /v1/save-batches/{batchId}", s.authorized(s.batchStatus))
-	m.HandleFunc("DELETE /v1/save-batches/{batchId}", s.authorized(s.batchStatus))
-	m.HandleFunc("POST /v1/save-batches/{batchId}/tickets", s.authorized(s.tickets))
-	m.HandleFunc("POST /v1/save-batches/{batchId}/retry", s.authorized(s.retryBatch))
-	m.HandleFunc("POST /v1/save-batches/{batchId}/items/{itemId}/fallback", s.authorized(s.fallbackItem))
-	m.HandleFunc("POST /v1/save-batches/{batchId}/items/{itemId}/copy-link", s.authorized(s.copyLink))
+	m.HandleFunc("POST /v1/save-batches", s.authorizedBatch(s.createBatch))
+	m.HandleFunc("GET /v1/save-batches/{batchId}", s.authorizedBatch(s.batchStatus))
+	m.HandleFunc("DELETE /v1/save-batches/{batchId}", s.authorizedBatch(s.batchStatus))
+	m.HandleFunc("POST /v1/save-batches/{batchId}/tickets", s.authorizedBatch(s.tickets))
+	m.HandleFunc("POST /v1/save-batches/{batchId}/retry", s.authorizedBatch(s.retryBatch))
+	m.HandleFunc("POST /v1/save-batches/{batchId}/items/{itemId}/fallback", s.authorizedBatch(s.fallbackItem))
+	m.HandleFunc("POST /v1/save-batches/{batchId}/items/{itemId}/copy-link", s.authorizedBatch(s.copyLink))
 	m.HandleFunc("POST /v1/feedbacks", s.authorized(s.submitFeedback))
 	m.HandleFunc("GET /v1/feedbacks", s.authorized(s.feedbackList))
 	m.HandleFunc("GET /v1/feedbacks/{feedbackId}", s.authorized(s.feedbackDetail))
@@ -350,6 +347,9 @@ func (s *Mock) prune(now time.Time) {
 	}
 }
 func (s *Mock) replay(w http.ResponseWriter, r *http.Request, c credential, op string, req any, now time.Time) (string, idem, bool) {
+	return s.replayWithKeys(w, r, c, op, req, now, s.keys)
+}
+func (s *Mock) replayWithKeys(w http.ResponseWriter, r *http.Request, c credential, op string, req any, now time.Time, keys map[string]idem) (string, idem, bool) {
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" || len(key) > 100 {
 		fail(w, 400, "BAD_REQUEST")
@@ -358,13 +358,13 @@ func (s *Mock) replay(w http.ResponseWriter, r *http.Request, c credential, op s
 	key = c.User + ":" + op + ":" + key
 	raw, _ := json.Marshal(req)
 	digest := auth.Digest(s.Sessions.Key, string(raw))
-	rec := s.keys[key]
+	rec := keys[key]
 	if rec.ID != "" && rec.Digest != digest {
 		fail(w, 409, "IDEMPOTENCY_CONFLICT")
 		return "", idem{}, false
 	}
 	if rec.ID == "" {
-		if int64(len(s.keys)) >= s.Settings.Int("memory_parse_cache_max_entries") {
+		if int64(len(keys)) >= s.Settings.Int("memory_parse_cache_max_entries") {
 			fail(w, 503, "SERVICE_BUSY")
 			return "", idem{}, false
 		}
