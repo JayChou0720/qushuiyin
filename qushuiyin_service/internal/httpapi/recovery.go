@@ -154,7 +154,8 @@ func (s *Mock) retryBatch(w http.ResponseWriter, r *http.Request, c credential) 
 			fail(w, 404, "RESOURCE_NOT_FOUND")
 			return
 		}
-		retryable := x.Status == "EXPIRED" || x.Status == "CANCELLED" || (x.Status == "FAILED" && (x.Failure == "PREPARE_TIMEOUT" || (x.CopyAvailable && !now.Before(x.AvailableUntil))))
+		retryableFailure := x.Failure == "PREPARE_TIMEOUT" || x.Failure == "SERVICE_BUSY" || x.CopyAvailable && !now.Before(x.AvailableUntil)
+		retryable := x.Status == "EXPIRED" || x.Status == "CANCELLED" || x.Status == "FAILED" && retryableFailure
 		if !retryable {
 			fail(w, 409, "FILE_NOT_READY")
 			return

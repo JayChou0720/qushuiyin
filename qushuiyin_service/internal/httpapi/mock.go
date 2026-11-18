@@ -87,7 +87,7 @@ const privacyVersion = "2026-09-v1"
 var messages = map[string]string{"OK": "操作成功", "INPUT_EMPTY": "请粘贴作品分享链接", "INPUT_TOO_LONG": "内容过多，请只粘贴一个作品", "TOO_MANY_LINKS": "链接太多，请只粘贴一个作品", "MULTIPLE_LINKS": "检测到多个链接，请选择一个", "NO_LINK_FOUND": "未找到作品分享链接", "LINK_INVALID": "链接无效，请检查后重试", "LINK_NOT_ALLOWED": "链接无效或暂不支持该地址", "PLATFORM_UNSUPPORTED": "暂不支持这个平台", "PLATFORM_MAINTENANCE": "该平台暂时繁忙，请稍后再试", "CONTENT_TYPE_UNSUPPORTED": "暂不支持该内容类型", "UPSTREAM_UNAVAILABLE": "作品无法访问，可能已删除或限制访问", "UPSTREAM_INVALID_RESPONSE": "没有取得可用的媒体资源", "TOO_MANY_ASSETS": "作品资源过多", "PARSE_TIMEOUT": "解析超时，请重试", "AUTH_REQUIRED": "请先登录", "SESSION_EXPIRED": "使用状态已过期，请重试", "RESOURCE_NOT_FOUND": "资源不存在", "RESULT_EXPIRED": "解析结果已过期，请重新解析", "JOB_EXPIRED": "解析任务已过期", "BATCH_EXPIRED": "保存操作已过期", "BAD_REQUEST": "请求参数有误", "PRIVACY_VERSION_REQUIRED": "请先查看最新隐私说明", "IDEMPOTENCY_CONFLICT": "该操作已使用不同参数提交", "FILE_NOT_READY": "文件尚未准备好", "FALLBACK_NOT_ALLOWED": "当前下载方式不支持回退", "RATE_LIMITED": "操作较频繁，请稍后再试", "SERVICE_BUSY": "服务繁忙，请稍后再试", "INTERNAL_ERROR": "服务暂不可用"}
 
 func issue(code string) dto {
-	return dto{"code": code, "message": messageFor(code), "retryable": code == "UPSTREAM_UNAVAILABLE" || code == "PARSE_TIMEOUT" || code == "PREPARE_TIMEOUT" || code == "MEDIA_SOURCE_EXPIRED"}
+	return dto{"code": code, "message": messageFor(code), "retryable": code == "UPSTREAM_UNAVAILABLE" || code == "PARSE_TIMEOUT" || code == "PREPARE_TIMEOUT" || code == "MEDIA_SOURCE_EXPIRED" || code == "SERVICE_BUSY"}
 }
 func messageFor(code string) string {
 	switch code {
