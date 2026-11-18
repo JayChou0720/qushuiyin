@@ -132,6 +132,20 @@ func (s *Mock) cleanDatabase(ctx context.Context, now time.Time) {
 	defer cancel()
 	db := s.Sessions.DB
 	limit := s.Settings.Int("pagination_max")
+	if s.Persistent {
+		// Keep opaque IDs for explicit expiry/idempotency responses, but erase
+		// source signatures and content as soon as their short retention ends.
+		for _, q := range []string{
+			"UPDATE parse_job SET source_url_enc=NULL,version=version+1 WHERE source_expires_at<=? AND source_url_enc IS NOT NULL LIMIT ?",
+			"UPDATE parse_result SET history_url_enc=NULL,title=NULL,description=NULL,author_name=NULL,content_id=NULL WHERE expires_at<=? AND (history_url_enc IS NOT NULL OR title IS NOT NULL OR description IS NOT NULL OR author_name IS NOT NULL OR content_id IS NOT NULL) LIMIT ?",
+			"UPDATE media_asset SET source_candidates_enc='',availability='unavailable',reason_code='MEDIA_SOURCE_EXPIRED',version=version+1 WHERE source_expiry<=? AND source_candidates_enc<>'' LIMIT ?",
+			"UPDATE media_object SET status='expired',version=version+1 WHERE expires_at<=? AND status='ready' LIMIT ?",
+		} {
+			if _, err := db.ExecContext(ctx, q, now, limit); err != nil {
+				slog.Warn("short-lived media retention sweep failed")
+			}
+		}
+	}
 	rows, err := db.QueryContext(ctx, "SELECT id,deadline_at FROM cleanup_job WHERE kind='user_data' AND status='PENDING' ORDER BY updated_at,id LIMIT ?", limit)
 	if err != nil {
 		slog.Warn("local data cleanup could not read pending jobs")

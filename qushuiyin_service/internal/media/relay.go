@@ -40,6 +40,8 @@ type Relay struct {
 	Directory, FFprobe string
 	mu                 sync.Mutex
 	pending            map[string]chan struct{}
+	active             map[string]int
+	reserved           int64
 }
 
 // Only this module chooses paths. Storage keys and source candidates never
@@ -78,6 +80,21 @@ func (r *Relay) Prepare(ctx context.Context, platform, contentID, version string
 			info, e := f.Stat()
 			f.Close()
 			if e == nil && info.Size() == existing.Size {
+				var ready time.Time
+				if e = r.DB.QueryRowContext(ctx, "SELECT ready_at FROM media_file WHERE id=?", existing.ID).Scan(&ready); e != nil {
+					return Prepared{}, e
+				}
+				until := time.Now().Add(r.Settings.Seconds("media_cache_ttl_seconds"))
+				maximum := ready.Add(r.Settings.Seconds("shared_media_max_age_seconds"))
+				if until.After(maximum) {
+					until = maximum
+				}
+				if until.After(existing.Expires) {
+					if _, e = r.DB.ExecContext(ctx, "UPDATE media_file SET expires_at=?,last_access_at=UTC_TIMESTAMP(3) WHERE id=? AND status='ready'", until, existing.ID); e != nil {
+						return Prepared{}, e
+					}
+					existing.Expires = until
+				}
 				return existing, nil
 			}
 		}
@@ -85,6 +102,11 @@ func (r *Relay) Prepare(ctx context.Context, platform, contentID, version string
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return Prepared{}, err
 	}
+	release, err := r.reserve(ctx, a.Kind)
+	if err != nil {
+		return Prepared{}, err
+	}
+	defer release()
 	sources := append([]string{a.Source}, a.Alternates...)
 	var last error
 	for i, source := range sources {
@@ -103,6 +125,7 @@ func (r *Relay) Prepare(ctx context.Context, platform, contentID, version string
 		// be retained until their active authorizations and transfers have ended.
 		tx, e := r.DB.BeginTx(ctx, nil)
 		if e != nil {
+			_ = os.Remove(filepath.Join(r.Directory, file.StorageKey))
 			return Prepared{}, e
 		}
 		_, e = tx.ExecContext(ctx, "UPDATE media_file SET share_key=NULL WHERE share_key=? AND output_version=?", share, version)
@@ -115,6 +138,7 @@ func (r *Relay) Prepare(ctx context.Context, platform, contentID, version string
 			tx.Rollback()
 		}
 		if e != nil {
+			_ = os.Remove(filepath.Join(r.Directory, file.StorageKey))
 			return Prepared{}, e
 		}
 		return file, nil
@@ -182,14 +206,14 @@ func (r *Relay) fetch(ctx context.Context, source, kind string) (Prepared, error
 	actual := sniffMedia(part, 12)
 	if kind == "video" {
 		if actual != "video/mp4" {
-			return out, errors.New("MEDIA_FORMAT_UNSUPPORTED")
+			return out, errors.New("FORMAT_UNSUPPORTED")
 		}
 		if err = r.validateVideo(ctx, path); err != nil {
 			return out, err
 		}
 	} else {
 		if actual != "image/jpeg" && actual != "image/png" {
-			return out, errors.New("MEDIA_FORMAT_UNSUPPORTED")
+			return out, errors.New("FORMAT_UNSUPPORTED")
 		}
 		if _, err = part.Seek(0, io.SeekStart); err != nil {
 			return out, err
@@ -231,6 +255,24 @@ type limitedProbeOutput struct {
 	limit int
 }
 
+func (r *Relay) reserve(ctx context.Context, kind string) (func(), error) {
+	limit := r.Settings.Int("max_image_bytes")
+	if kind == "video" {
+		limit = r.Settings.Int("relay_max_video_bytes")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var used int64
+	if err := r.DB.QueryRowContext(ctx, "SELECT COALESCE(SUM(size_bytes),0) FROM media_file").Scan(&used); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || used+r.reserved+limit > r.Settings.Int("media_cache_budget_bytes") {
+		return nil, errors.New("SERVICE_BUSY")
+	}
+	r.reserved += limit
+	return sync.OnceFunc(func() { r.mu.Lock(); r.reserved -= limit; r.mu.Unlock() }), nil
+}
+
 func (b *limitedProbeOutput) Write(p []byte) (int, error) {
 	if len(b.bytes)+len(p) > b.limit {
 		return 0, errors.New("probe output limit")
@@ -246,7 +288,7 @@ func (r *Relay) validateVideo(ctx context.Context, path string) error {
 	cmd.Stdout = output
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
-		return errors.New("MEDIA_FORMAT_UNSUPPORTED")
+		return errors.New("FORMAT_UNSUPPORTED")
 	}
 	var info struct {
 		Format struct {
@@ -258,26 +300,26 @@ func (r *Relay) validateVideo(ctx context.Context, path string) error {
 		}
 	}
 	if json.Unmarshal(output.bytes, &info) != nil || !strings.Contains(info.Format.FormatName, "mp4") {
-		return errors.New("MEDIA_FORMAT_UNSUPPORTED")
+		return errors.New("FORMAT_UNSUPPORTED")
 	}
 	videos := 0
 	for _, stream := range info.Streams {
 		switch stream.Type {
 		case "video":
 			if stream.Codec != "h264" {
-				return errors.New("MEDIA_FORMAT_UNSUPPORTED")
+				return errors.New("FORMAT_UNSUPPORTED")
 			}
 			videos++
 		case "audio":
 			if stream.Codec != "aac" {
-				return errors.New("MEDIA_FORMAT_UNSUPPORTED")
+				return errors.New("FORMAT_UNSUPPORTED")
 			}
 		default:
-			return errors.New("MEDIA_FORMAT_UNSUPPORTED")
+			return errors.New("FORMAT_UNSUPPORTED")
 		}
 	}
 	if videos != 1 {
-		return errors.New("MEDIA_FORMAT_UNSUPPORTED")
+		return errors.New("FORMAT_UNSUPPORTED")
 	}
 	return nil
 }

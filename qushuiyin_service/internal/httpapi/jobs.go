@@ -273,7 +273,7 @@ func (s *Mock) resultData(w http.ResponseWriter, r *http.Request, c credential) 
 			}
 			return
 		}
-		view := Mock{results: map[string]*result{res.ID: res.result}}
+		view := Mock{Relay: s.Relay, results: map[string]*result{res.ID: res.result}}
 		view.resultData(w, r, c)
 		return
 	}
@@ -297,5 +297,5 @@ func (s *Mock) resultData(w http.ResponseWriter, r *http.Request, c credential) 
 		cover = x.Cover.public()
 	}
 	v := x.Value
-	ok(w, 200, dto{"resultId": x.ID, "platform": v.Platform, "contentId": v.ContentID, "mediaType": v.MediaType, "title": v.Title, "description": v.Description, "authorName": v.AuthorName, "durationMs": nil, "assetCount": len(assets), "assets": assets, "cover": cover, "warnings": v.Warnings, "createdAt": x.CreatedAt, "expiresAt": x.ExpiresAt, "capabilities": dto{"canPreview": true, "canSave": true, "canSaveCover": x.Cover != nil, "canCopyText": v.Description != nil}})
+	ok(w, 200, dto{"resultId": x.ID, "platform": v.Platform, "contentId": v.ContentID, "mediaType": v.MediaType, "title": v.Title, "description": v.Description, "authorName": v.AuthorName, "durationMs": nil, "assetCount": len(assets), "assets": assets, "cover": cover, "warnings": v.Warnings, "createdAt": x.CreatedAt, "expiresAt": x.ExpiresAt, "capabilities": dto{"canPreview": s.Relay == nil, "canSave": true, "canSaveCover": x.Cover != nil, "canCopyText": v.Description != nil}})
 }

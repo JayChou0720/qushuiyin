@@ -254,7 +254,7 @@ func (s *Mock) preparePersistentItem(ctx context.Context, owner string) (bool, e
 	defer tx.Rollback()
 	var bid, iid, user, enc string
 	var seq uint64
-	err = tx.QueryRowContext(ctx, `SELECT i.id,i.batch_id,i.user_id,i.claim_seq FROM save_batch_item i JOIN save_batch b ON b.id=i.batch_id JOIN app_user u ON u.id=i.user_id WHERE u.status='active' AND b.cancel_requested=FALSE AND b.expires_at>UTC_TIMESTAMP(3) AND i.prepare_status IN ('PENDING','PREPARING') AND (i.lease_expires_at IS NULL OR i.lease_expires_at<=UTC_TIMESTAMP(3)) ORDER BY i.created_at,i.id LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&iid, &bid, &user, &seq)
+	err = tx.QueryRowContext(ctx, `SELECT i.id,i.batch_id,i.user_id,i.claim_seq FROM save_batch_item i JOIN save_batch b ON b.id=i.batch_id JOIN parse_result p ON p.id=b.result_id JOIN app_user u ON u.id=i.user_id WHERE u.status='active' AND p.adapter_version=? AND b.cancel_requested=FALSE AND b.expires_at>UTC_TIMESTAMP(3) AND i.prepare_status IN ('PENDING','PREPARING') AND (i.lease_expires_at IS NULL OR i.lease_expires_at<=UTC_TIMESTAMP(3)) ORDER BY i.created_at,i.id LIMIT 1 FOR UPDATE SKIP LOCKED`, s.adapterVersion()).Scan(&iid, &bid, &user, &seq)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -311,13 +311,13 @@ func (s *Mock) preparePersistentItem(ctx context.Context, owner string) (bool, e
 		if !time.Now().Before(x.Deadline) {
 			x.Status, x.Failure = "FAILED", "PREPARE_TIMEOUT"
 		} else {
-			file, e := s.Relay.Prepare(call, res.Value.Platform, content, parse.Version, *source)
+			file, e := s.Relay.Prepare(call, res.Value.Platform, content, s.adapterVersion(), *source)
 			if e != nil {
 				x.Status, x.Failure = "FAILED", "MEDIA_SOURCE_EXPIRED"
 				if call.Err() != nil {
 					x.Failure = "PREPARE_TIMEOUT"
 				}
-				if e.Error() == "FILE_TOO_LARGE" || e.Error() == "MEDIA_FORMAT_UNSUPPORTED" {
+				if e.Error() == "FILE_TOO_LARGE" || e.Error() == "FORMAT_UNSUPPORTED" || e.Error() == "SERVICE_BUSY" {
 					x.Failure = e.Error()
 				}
 			} else {
@@ -366,6 +366,14 @@ func (s *Mock) publishPersistentItem(ctx context.Context, owner string, seq uint
 		return nil
 	}
 	if x.Status == "READY" && x.FileID != "" {
+		var fileState string
+		var expires time.Time
+		if err = tx.QueryRowContext(ctx, "SELECT status,expires_at FROM media_file WHERE id=? FOR UPDATE", x.FileID).Scan(&fileState, &expires); err != nil {
+			return err
+		}
+		if fileState != "ready" || !time.Now().Before(expires) {
+			return nil
+		}
 		_, err = tx.ExecContext(ctx, "INSERT INTO media_object(id,user_id,asset_id,file_id,output_version,status,expires_at) VALUES (?,?,?,?,?,'ready',?)", x.ObjectID, b.User, x.Asset.ID, x.FileID, x.ObjectID, x.AvailableUntil)
 		if err != nil {
 			return err

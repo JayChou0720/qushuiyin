@@ -3,6 +3,8 @@ package httpapi
 import (
 	"bytes"
 	"crypto/hmac"
+	"database/sql"
+	"errors"
 	"net/http"
 	"net/url"
 	"sort"
@@ -197,8 +199,8 @@ func (s *Mock) batchStatus(w http.ResponseWriter, r *http.Request, c credential)
 	}
 	ok(w, 200, dto{"batchId": b.ID, "status": b.Status, "expiresAt": b.ExpiresAt, "items": items})
 }
-func (s *Mock) signature(mode, bid, oid, digest, expire string) string {
-	return auth.Digest(s.TicketKey, "mock-download:"+mode+":"+bid+":"+oid+":"+digest+":"+expire)
+func (s *Mock) signature(mode, bid, oid, digest, expire, ticket string) string {
+	return auth.Digest(s.TicketKey, "download:v1:"+mode+":"+bid+":"+oid+":"+digest+":"+expire+":"+ticket)
 }
 func (s *Mock) tickets(w http.ResponseWriter, r *http.Request, c credential) {
 	var req struct{ ItemIDs []string }
@@ -246,6 +248,19 @@ func (s *Mock) tickets(w http.ResponseWriter, r *http.Request, c credential) {
 			return
 		}
 		expires := x.AvailableUntil
+		if s.Relay != nil {
+			var authorizationExpiry time.Time
+			err := s.Sessions.DB.QueryRowContext(r.Context(), `SELECT LEAST(o.expires_at,f.expires_at,b.expires_at) FROM media_object o JOIN media_file f ON f.id=o.file_id JOIN save_batch_item i ON i.media_object_id=o.id JOIN save_batch b ON b.id=i.batch_id WHERE o.id=? AND o.user_id=? AND i.user_id=? AND b.user_id=? AND b.id=? AND o.status='ready' AND f.status='ready' AND i.prepare_status='READY' AND b.cancel_requested=FALSE AND o.expires_at>UTC_TIMESTAMP(3) AND f.expires_at>UTC_TIMESTAMP(3) AND b.expires_at>UTC_TIMESTAMP(3)`, x.ObjectID, c.User, c.User, c.User, b.ID).Scan(&authorizationExpiry)
+			if errors.Is(err, sql.ErrNoRows) {
+				fail(w, 410, "MEDIA_SOURCE_EXPIRED")
+				return
+			}
+			if err != nil {
+				fail(w, 503, "SERVICE_BUSY")
+				return
+			}
+			expires = minTime(expires, authorizationExpiry)
+		}
 		if x.Mode == "relay" {
 			expires = minTime(expires, now.Add(s.Settings.Seconds("media_ticket_ttl_seconds")))
 		}
@@ -268,16 +283,21 @@ func (s *Mock) mediaURL(mode, bid, oid, digest string, expires time.Time) string
 		path = "mock-source/" + mode
 	}
 	epoch := strconv.FormatInt(expires.Unix(), 10)
-	q := url.Values{"b": {bid}, "s": {digest}, "e": {epoch}, "t": {s.signature(mode, bid, oid, digest, epoch)}}
+	ticket := auth.ID()
+	q := url.Values{"b": {bid}, "s": {digest}, "e": {epoch}, "v": {"1"}, "i": {ticket}, "t": {s.signature(mode, bid, oid, digest, epoch, ticket)}}
 	return s.Origin + "/media/" + path + "/" + oid + "?" + q.Encode()
 }
 func (s *Mock) download(mode string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if s.Relay != nil && mode != "relay" {
+			fail(w, 404, "RESOURCE_NOT_FOUND")
+			return
+		}
 		q := r.URL.Query()
 		bid, session, epoch, sig := q.Get("b"), q.Get("s"), q.Get("e"), q.Get("t")
 		oid := r.PathValue("mediaObjectId")
 		n, e := strconv.ParseInt(epoch, 10, 64)
-		if e != nil || time.Now().Unix() >= n || len(bid) > 64 || len(session) != 64 || len(oid) > 64 || !hmac.Equal([]byte(sig), []byte(s.signature(mode, bid, oid, session, epoch))) {
+		if e != nil || time.Now().Unix() >= n || len(bid) > 64 || len(session) != 64 || len(oid) > 64 || q.Get("v") != "1" || len(q.Get("i")) == 0 || len(q.Get("i")) > 64 || !hmac.Equal([]byte(sig), []byte(s.signature(mode, bid, oid, session, epoch, q.Get("i")))) {
 			fail(w, 403, "ACCESS_DENIED")
 			return
 		}

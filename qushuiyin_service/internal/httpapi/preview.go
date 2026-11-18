@@ -19,6 +19,12 @@ type preview struct {
 }
 
 func (s *Mock) previewTickets(w http.ResponseWriter, r *http.Request, c credential) {
+	// Until the separate bounded preview pipeline is ready, live results must
+	// never return the synthetic media used by local Mock previews.
+	if s.Relay != nil {
+		fail(w, 503, "DIRECT_DOWNLOAD_UNAVAILABLE")
+		return
+	}
 	var req struct{ AssetIDs []string }
 	if !s.read(w, r, &req) {
 		return

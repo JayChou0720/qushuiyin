@@ -76,7 +76,7 @@ async function login(allowNew = true): Promise<Session> {
     const epoch = identityEpoch
     loggingIn = (async () => {
       const config = cached || await loadConfig()
-      if (!config.features.mock || !config.features.devLogin) throw new Error('本地开发登录未开启')
+      if (!config.features.devLogin) throw new Error('本地开发登录未开启')
       let name = wx.getStorageSync(mockIdentityKey) as string
       if (!name) {
         if (!allowNew) throw new Error('此设备还没有使用过服务，无需清除')

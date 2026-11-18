@@ -1,5 +1,5 @@
-// Package httpapi exposes the local mock API. Its task state is disposable;
-// sessions and configuration use the same database boundaries as the service.
+// Package httpapi exposes the local development API with either fixture or live
+// parsing. Persistent mode stores tasks, results and save batches in MySQL.
 package httpapi
 
 import (
@@ -29,33 +29,35 @@ type Platform struct {
 	Text   bool   `json:"textEnabled"`
 }
 type Mock struct {
-	Persistent     bool
-	persistentGate sync.Mutex
-	TaskKeys       map[string][]byte
-	TaskKeyVersion string
-	Relay          *media.Relay
-	Admin          auth.AdminStore
-	AdminHost      string
-	AdminOrigins   map[string]bool
-	adminHashSlots chan struct{}
-	Settings       config.Values
-	Sessions       auth.Store
-	TicketKey      []byte
-	Adapter        parse.Adapter
-	Platforms      []Platform
-	Origin         string
-	DevLogin       bool
-	lifecycle      sync.RWMutex
-	mu             sync.Mutex
-	parseContext   context.Context
-	parsePool      chan struct{}
-	parseCache     *parseCache
-	jobs           map[string]*job
-	results        map[string]*result
-	batches        map[string]*batch
-	previews       map[string]*preview
-	keys           map[string]idem
-	rates          map[string]meter
+	Persistent       bool
+	AdapterTag       string
+	persistentGate   sync.Mutex
+	TaskKeys         map[string][]byte
+	TaskKeyVersion   string
+	Relay            *media.Relay
+	mediaConnections map[string]int64
+	Admin            auth.AdminStore
+	AdminHost        string
+	AdminOrigins     map[string]bool
+	adminHashSlots   chan struct{}
+	Settings         config.Values
+	Sessions         auth.Store
+	TicketKey        []byte
+	Adapter          parse.Adapter
+	Platforms        []Platform
+	Origin           string
+	DevLogin         bool
+	lifecycle        sync.RWMutex
+	mu               sync.Mutex
+	parseContext     context.Context
+	parsePool        chan struct{}
+	parseCache       *parseCache
+	jobs             map[string]*job
+	results          map[string]*result
+	batches          map[string]*batch
+	previews         map[string]*preview
+	keys             map[string]idem
+	rates            map[string]meter
 }
 type meter struct {
 	Until time.Time
@@ -85,6 +87,10 @@ func issue(code string) dto {
 }
 func messageFor(code string) string {
 	switch code {
+	case "FILE_TOO_LARGE":
+		return "文件超过当前可保存大小"
+	case "FORMAT_UNSUPPORTED":
+		return "当前格式暂不支持保存"
 	case "DAILY_LIMIT_REACHED":
 		return "今日操作次数已达上限，请稍后再试"
 	case "VERSION_CONFLICT":
@@ -234,7 +240,7 @@ func (s *Mock) publicConfig(w http.ResponseWriter, r *http.Request) {
 	for _, k := range keys {
 		limits[k] = s.Settings.Data[k]
 	}
-	configData := dto{"platforms": s.Platforms, "limits": limits, "features": dto{"mock": true, "devLogin": s.DevLogin, "directPreviewEnabled": false}, "privacyVersion": privacyVersion, "notice": "", "help": dto{}, "serviceStatus": "normal"}
+	configData := dto{"platforms": s.Platforms, "limits": limits, "features": dto{"mock": s.Relay == nil, "devLogin": s.DevLogin, "directPreviewEnabled": false}, "privacyVersion": privacyVersion, "notice": "", "help": dto{}, "serviceStatus": "normal"}
 	raw, _ := json.Marshal(configData)
 	etag := auth.Digest(s.Sessions.Key, string(raw))
 	w.Header().Set("ETag", "\""+etag+"\"")
@@ -258,6 +264,7 @@ func (s *Mock) Handler(ctx context.Context) http.Handler {
 	s.previews = map[string]*preview{}
 	s.keys = map[string]idem{}
 	s.rates = map[string]meter{}
+	s.mediaConnections = map[string]int64{}
 	m := http.NewServeMux()
 	if s.Admin.DB != nil && s.AdminHost != "" {
 		s.adminRoutes(m)

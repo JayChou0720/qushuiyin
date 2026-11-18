@@ -28,6 +28,13 @@ type persistentParse struct {
 	Owner              string
 }
 
+func (s *Mock) adapterVersion() string {
+	if s.AdapterTag != "" {
+		return s.AdapterTag
+	}
+	return parse.MockVersion
+}
+
 func (s *Mock) ConfigureTaskKeys(raw string) error {
 	s.TaskKeys = make(map[string][]byte)
 	latest := 0
@@ -152,7 +159,7 @@ func (s *Mock) createPersistentParse(w http.ResponseWriter, r *http.Request, c c
 	j := job{ID: auth.ID(), User: c.User, Platform: platform, Status: "QUEUED", FlowID: req.FlowID, Created: now, Deadline: now.Add(s.Settings.Seconds("parse_job_timeout_seconds")), Expires: now.Add(s.Settings.Seconds("result_ttl_seconds"))}
 	enc, err := s.sealTask(j.ID, "source", selected)
 	if err == nil {
-		_, err = tx.ExecContext(ctx, "INSERT INTO parse_job(id,user_id,flow_id,platform,status,source_hash,source_url_enc,source_expires_at,adapter_version,deadline_at,expires_at,force_refresh) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", j.ID, j.User, j.FlowID, j.Platform, j.Status, auth.Digest(s.Sessions.Key, selected), enc, j.Expires, parse.Version, j.Deadline, j.Expires, req.ForceRefresh)
+		_, err = tx.ExecContext(ctx, "INSERT INTO parse_job(id,user_id,flow_id,platform,status,source_hash,source_url_enc,source_expires_at,adapter_version,deadline_at,expires_at,force_refresh) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", j.ID, j.User, j.FlowID, j.Platform, j.Status, auth.Digest(s.Sessions.Key, selected), enc, j.Expires, s.adapterVersion(), j.Deadline, j.Expires, req.ForceRefresh)
 	}
 	if err == nil {
 		_, err = tx.ExecContext(ctx, "INSERT INTO idempotency_record(id,user_id,operation,key_value,payload_hash,object_type,object_id,expires_at) VALUES (?,?,'parse',?,?,'parse_job',?,?)", auth.ID(), c.User, key, digest, j.ID, now.Add(s.Settings.Seconds("idempotency_ttl_seconds")))
@@ -179,7 +186,7 @@ func (s *Mock) claimParse(ctx context.Context, owner string) (*persistentParse, 
 	}
 	p := &persistentParse{Job: &job{}, Owner: owner}
 	var enc string
-	err = tx.QueryRowContext(ctx, `SELECT j.id,j.user_id,j.platform,j.flow_id,j.created_at,j.deadline_at,j.expires_at,j.source_url_enc,j.source_hash,j.force_refresh,j.claim_seq FROM parse_job j JOIN app_user u ON u.id=j.user_id WHERE u.status='active' AND j.cancel_requested=FALSE AND j.deadline_at>UTC_TIMESTAMP(3) AND (j.status='QUEUED' OR (j.status='RUNNING' AND j.lease_expires_at<=UTC_TIMESTAMP(3))) ORDER BY j.created_at,j.id LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&p.Job.ID, &p.Job.User, &p.Job.Platform, &p.Job.FlowID, &p.Job.Created, &p.Job.Deadline, &p.Job.Expires, &enc, &p.SourceHash, &p.Refresh, &p.Claim)
+	err = tx.QueryRowContext(ctx, `SELECT j.id,j.user_id,j.platform,j.flow_id,j.created_at,j.deadline_at,j.expires_at,j.source_url_enc,j.source_hash,j.force_refresh,j.claim_seq FROM parse_job j JOIN app_user u ON u.id=j.user_id WHERE u.status='active' AND j.adapter_version=? AND j.cancel_requested=FALSE AND j.deadline_at>UTC_TIMESTAMP(3) AND (j.status='QUEUED' OR (j.status='RUNNING' AND j.lease_expires_at<=UTC_TIMESTAMP(3))) ORDER BY j.created_at,j.id LIMIT 1 FOR UPDATE SKIP LOCKED`, s.adapterVersion()).Scan(&p.Job.ID, &p.Job.User, &p.Job.Platform, &p.Job.FlowID, &p.Job.Created, &p.Job.Deadline, &p.Job.Expires, &enc, &p.SourceHash, &p.Refresh, &p.Claim)
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +250,7 @@ func (s *Mock) finishParse(ctx context.Context, p *persistentParse, parsed *pars
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, "INSERT INTO parse_result(id,user_id,job_id,platform,content_id,media_type,title,description,author_name,warnings,expires_at,source_hash,adapter_version,history_url_enc) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", resID, p.Job.User, p.Job.ID, parsed.Platform, parsed.ContentID, parsed.MediaType, parsed.Title, parsed.Description, parsed.AuthorName, string(warnings), p.Job.Expires, p.SourceHash, parse.Version, history)
+	_, err = tx.ExecContext(ctx, "INSERT INTO parse_result(id,user_id,job_id,platform,content_id,media_type,title,description,author_name,warnings,expires_at,source_hash,adapter_version,history_url_enc) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", resID, p.Job.User, p.Job.ID, parsed.Platform, parsed.ContentID, parsed.MediaType, parsed.Title, parsed.Description, parsed.AuthorName, string(warnings), p.Job.Expires, p.SourceHash, s.adapterVersion(), history)
 	if err != nil {
 		return err
 	}
@@ -392,6 +399,9 @@ func (s *Mock) loadPersistentResult(ctx context.Context, user, id string) (*pers
 		return nil, err
 	}
 	out := &persistentResult{result: res}
+	if !time.Now().Before(res.ExpiresAt) {
+		return out, nil
+	}
 	if history != "" {
 		var source string
 		if err = s.openTask(id, "history", history, &source); err != nil {

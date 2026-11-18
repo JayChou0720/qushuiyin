@@ -143,6 +143,15 @@ func (s *Mock) submitFeedback(w http.ResponseWriter, r *http.Request, c credenti
 		j := s.jobs[req.TraceID]
 		owned := j != nil && j.User == c.User && j.Status == "FAILED" && now.Before(j.Expires)
 		s.mu.Unlock()
+		if s.Persistent {
+			var n int
+			err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM parse_job WHERE id=? AND user_id=? AND status='FAILED' AND expires_at>?", req.TraceID, c.User, now).Scan(&n)
+			if err != nil {
+				privateWriteError(w, err)
+				return
+			}
+			owned = n == 1
+		}
 		if !owned {
 			fail(w, 404, "RESOURCE_NOT_FOUND")
 			return

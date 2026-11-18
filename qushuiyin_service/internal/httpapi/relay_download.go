@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -23,19 +24,76 @@ func (s *Mock) relayDownload(w http.ResponseWriter, r *http.Request, user, bid, 
 		fail(w, 404, "RESOURCE_NOT_FOUND")
 		return
 	}
-	file, err := s.Relay.Open(key)
+	file, release, err := s.Relay.Acquire(key)
 	if err != nil {
 		fail(w, 410, "MEDIA_SOURCE_EXPIRED")
 		return
 	}
-	defer file.Close()
+	defer release()
 	info, err := file.Stat()
 	if err != nil || info.Size() != size {
 		fail(w, 410, "MEDIA_SOURCE_EXPIRED")
 		return
 	}
+	releaseConnection, allowed := s.acquireMedia(user, r.URL.Query().Get("i"))
+	if !allowed {
+		fail(w, 503, "SERVICE_BUSY")
+		return
+	}
+	defer releaseConnection()
+	counted := &countedMediaResponse{ResponseWriter: w}
+	if r.Method == http.MethodGet {
+		reserve, valid := mediaRangeSize(r.Header.Get("Range"), size)
+		if !valid {
+			fail(w, 416, "BAD_REQUEST")
+			return
+		}
+		if r.Header.Get("If-Range") != "" {
+			reserve = size
+		}
+		settle, e := s.reserveEgress(r.Context(), user, reserve)
+		if e != nil {
+			fail(w, 429, "RATE_LIMITED")
+			return
+		}
+		defer func() { settle(counted.sent) }()
+	}
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(s.Settings.Seconds("client_download_timeout_seconds")))
 	w.Header().Set("Content-Type", mime)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("ETag", "\""+hash+"\"")
-	http.ServeContent(w, r, "media", time.Time{}, file)
+	http.ServeContent(counted, r, "media", time.Time{}, file)
+}
+
+func mediaRangeSize(header string, size int64) (int64, bool) {
+	if header == "" {
+		return size, true
+	}
+	if !strings.HasPrefix(header, "bytes=") {
+		return 0, false
+	}
+	parts := strings.SplitN(strings.TrimPrefix(header, "bytes="), "-", 2)
+	if len(parts) != 2 {
+		return 0, false
+	}
+	if parts[0] == "" {
+		suffix, e := strconv.ParseInt(parts[1], 10, 64)
+		if e != nil || suffix <= 0 {
+			return 0, false
+		}
+		return min(suffix, size), true
+	}
+	start, e := strconv.ParseInt(parts[0], 10, 64)
+	if e != nil || start < 0 || start >= size {
+		return 0, false
+	}
+	end := size - 1
+	if parts[1] != "" {
+		end, e = strconv.ParseInt(parts[1], 10, 64)
+		if e != nil || end < start {
+			return 0, false
+		}
+		end = min(end, size-1)
+	}
+	return end - start + 1, true
 }

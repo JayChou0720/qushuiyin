@@ -46,6 +46,16 @@ node ./scripts/smoke-events.cjs $historyBuild 18080
 
 事件回归复用相同的临时编译目录，覆盖离线暂存、批量补传、丢失回执后的退避和去重，以及清除当前身份的待传队列。Mock 下载产生下载与保存动作汇总事件，相册结果事件留给真实相册回调。
 
+## M2：持久化与本地真实中转
+
+`serve` 的任务、结果、候选源、批次和幂等记录使用 MySQL，重启后由过期租约恢复。启动前执行 `migrate up`，保留同一套 `DATA_ENCRYPTION_KEYS`、`HMAC_KEY` 和 `TICKET_SIGNING_KEY`。`start-mock.ps1` 会在项目外的本机运行目录保存开发密钥，勿删除后用新密钥连接旧数据库。
+
+本地真实解析与中转使用 `APP_ENV=local`、`PARSE_MODE=live`、`WECHAT_DEV_LOGIN=true`，设置回环 `HTTP_ADDR`，清除 `MOCK_MEDIA_ORIGIN`。此外设置绝对路径 `MEDIA_DIR` 与 `FFPROBE_PATH`，例如 `D:\FFmpeg\bin\ffprobe.exe`，再运行 `qushuiyin-server serve`。只有开发、测试环境可运行这一入口。真实微信登录与生产入口尚未开放。
+
+中转文件通过实际 GET、字节数和魔数校验，视频还需通过 ffprobe 的 MP4/H.264/AAC 校验。后台 worker 完成后签发媒体对象票据；下载支持 HEAD 和单段 Range。JPEG/PNG 同样做完整解码和像素限制。WebP 转换、真实预览和直连优先策略仍待接入，live 结果当前不开放预览。
+
+MySQL 验证用 `MYSQL_TEST_DSN` 指向独立的回环 `qushuiyin_test` 库。设置 `FFPROBE_TEST_PATH` 后运行 `go test -p 1 ./...`，可执行任务恢复、幂等、取消竞争、旧媒体租约回写、文件复用、Range 和清理测试。`-p 1` 防止多个包同时迁移同一个测试库。
+
 ## M0：能力验证
 
 以下命令用于解析能力验证和 CDN 主机采集。

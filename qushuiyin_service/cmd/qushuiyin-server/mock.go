@@ -10,6 +10,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,13 +20,19 @@ import (
 	"qushuiyin/service/internal/auth"
 	"qushuiyin/service/internal/config"
 	"qushuiyin/service/internal/httpapi"
+	"qushuiyin/service/internal/media"
+	"qushuiyin/service/internal/outbound"
 	"qushuiyin/service/internal/parse"
 )
 
 func mockCommand(ctx context.Context, command string, getenv func(string) string, out io.Writer) error {
 	env := getenv("APP_ENV")
-	if (env != "local" && env != "test") || getenv("PARSE_MODE") != "mock" {
-		return errors.New("mock command requires APP_ENV=local or test and PARSE_MODE=mock")
+	mode := getenv("PARSE_MODE")
+	if (env != "local" && env != "test") || (mode != "mock" && (mode != "live" || command != "serve")) {
+		return errors.New("local service requires APP_ENV=local or test and a supported PARSE_MODE")
+	}
+	if mode == "live" && (getenv("MOCK_MEDIA_ORIGIN") != "" || getenv("PARSE_VIDEO_DOUYIN_COOKIE") != "") {
+		return errors.New("live mode rejects mock and cookie overrides")
 	}
 	addr := getenv("HTTP_ADDR")
 	host, port, e := net.SplitHostPort(addr)
@@ -91,6 +99,13 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 	l.Job = settings.Seconds("parse_job_timeout_seconds")
 	l.ParserCall = settings.Seconds("parser_call_timeout_seconds")
 	parser, e := parse.Mock(l, policy)
+	if mode == "live" {
+		l.Upstream, e = settings.Upstream()
+		if e != nil {
+			return e
+		}
+		parser = parse.Live(l, policy, outbound.Client{Transport: outbound.Transport(), Redirects: l.Redirects})
+	}
 	if e != nil {
 		return errors.New("invalid parser fixtures")
 	}
@@ -120,21 +135,41 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 		}
 		mock.AdminOrigins[v] = true
 	}
-	// All requests are bounded by the job budget; only small sample files are served.
+	// Persist tasks before returning; bounded workers publish their results.
 	mock.Persistent = true
+	mock.AdapterTag = parse.MockVersion
+	if mode == "live" {
+		mock.AdapterTag = parse.Version + ":" + parse.DouyinH5Version
+	}
 	if e = mock.ConfigureTaskKeys(getenv("DATA_ENCRYPTION_KEYS")); e != nil {
 		return e
 	}
+	if mode == "live" {
+		dir, probe := getenv("MEDIA_DIR"), getenv("FFPROBE_PATH")
+		if !filepath.IsAbs(dir) || !filepath.IsAbs(probe) {
+			return errors.New("live media requires absolute MEDIA_DIR and FFPROBE_PATH")
+		}
+		if st, err := os.Stat(probe); err != nil || !st.Mode().IsRegular() {
+			return errors.New("ffprobe executable unavailable")
+		}
+		if e = settings.Validate("media_workers", "media_fetch_timeout_seconds", "relay_max_video_bytes", "max_image_bytes", "max_image_pixels", "max_media_candidates", "media_cache_budget_bytes", "shared_media_max_age_seconds", "global_media_connections", "user_media_connections", "ticket_connections", "global_media_egress_per_day_bytes", "user_media_egress_per_day_bytes", "lease_cleanup_grace_seconds"); e != nil {
+			return e
+		}
+		mock.Relay = &media.Relay{DB: db, Client: outbound.Client{Transport: outbound.Transport(), Redirects: l.Redirects}, Settings: settings, Key: key, Directory: dir, FFprobe: probe}
+	}
 	srv := http.Server{Addr: addr, Handler: mock.Handler(ctx), ReadTimeout: l.Job, WriteTimeout: l.Job, IdleTimeout: settings.Seconds("config_client_cache_seconds")}
-	mock.RunPersistentParse(ctx)
-	mock.RunPersistentMedia(ctx)
 	listener, e := net.Listen("tcp", addr)
 	if e != nil {
 		return errors.New("local HTTP port is unavailable")
 	}
+	mock.RunPersistentParse(ctx)
+	mock.RunPersistentMedia(ctx)
+	if mock.Relay != nil {
+		go mock.Relay.Clean(ctx)
+	}
 	go mock.Clean(ctx)
 	go func() { <-ctx.Done(); _ = srv.Close() }()
-	fmt.Fprintln(out, "mock API listening at "+origin)
+	fmt.Fprintln(out, "local "+mode+" API listening at "+origin)
 	if e = srv.Serve(listener); errors.Is(e, http.ErrServerClosed) {
 		return nil
 	}
