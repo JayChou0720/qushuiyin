@@ -43,8 +43,8 @@ Target server: 2 cores / 2 GB / 50 GB SSD with MySQL on the same box (tuning and
 - Only `internal/parse` may import `github.com/wujunwei928/parse-video/parser`. Call `ParseVideoShareUrlContext(ctx, url)` with a task-deadline context. Never use upstream's `cmd` package (Gin server, CLI, downloader).
 - Our adapter decides the platform first and only passes enabled platforms to the library. Upstream errors are mostly untyped strings, so map only what can be detected (unsupported URL, context timeout or cancel) and treat the rest as parse failure. Raw error text goes only to redacted server logs.
 - Upstream returns few fields (no content ID, no duration, title and caption merged). §12.1 defines the mapping and which fields are null.
-- Upstream's outbound limits (domain allowlist, dial-time private-IP rejection, 16 MiB response cap, 30 s parse timeout, 10 redirects) must not be bypassed. Leave `PARSE_VIDEO_DOUYIN_COOKIE` unset.
-- If a platform breaks upstream and must be fixed before upstream does, swap in our own implementation for that platform inside the adapter. Record the swap and remove it after upgrading.
+- Upstream's outbound limits (domain allowlist, dial-time private-IP rejection, 16 MiB response cap, 30 s parse timeout, 10 redirects) must not be bypassed. Leave `PARSE_VIDEO_DOUYIN_COOKIE` unset. Login-account cookies are forbidden; only anonymous session cookies that a platform's own page sets during the same parse may be used, in memory only.
+- If a platform breaks upstream and must be fixed before upstream does, swap in our own implementation for that platform inside the adapter. Record the swap and remove it after upgrading. **Active swap: Douyin** (upstream now demands a cookie). Use the self-written H5 `iteminfo` flow specified in spec §12.1 item 8; don't copy unreviewed PR code.
 
 ## Mini-program commands
 
