@@ -61,7 +61,7 @@ func TestProbeSniffsGenericMediaTypes(t *testing.T) {
 				}
 				return &http.Response{StatusCode: tc.status, Header: headers, ContentLength: length, Body: body}, nil
 			})}
-			obs := (Probe{client, l, &record{status: "registered"}}).Inspect(t.Context(), "xiaohongshu", parse.Asset{Kind: tc.kind, Source: "https://cdn.test/media"})
+			obs := (Probe{Client: client, Limits: l, Domains: &record{status: "registered"}}).Inspect(t.Context(), "xiaohongshu", parse.Asset{Kind: tc.kind, Source: "https://cdn.test/media"})
 			if obs.Type != tc.mime || obs.Reason != tc.reason || obs.Direct != (tc.reason == "OK") || body.reads != tc.reads {
 				t.Fatalf("observation %+v, read %d bytes", obs, body.reads)
 			}
@@ -103,7 +103,7 @@ func TestProbeTriesBoundedAlternatesForOneAsset(t *testing.T) {
 			}
 			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {typ}}, ContentLength: 42, Body: http.NoBody}, nil
 		})}
-		obs := (Probe{client, l, &record{status: "registered"}}).Inspect(t.Context(), "douyin", a)
+		obs := (Probe{Client: client, Limits: l, Domains: &record{status: "registered"}}).Inspect(t.Context(), "douyin", a)
 		if calls != limit || obs.Order != a.Order || obs.Role != a.Role || obs.Direct != (limit == 3) {
 			t.Fatalf("limit %d, calls %d, observation %+v", limit, calls, obs)
 		}
@@ -125,7 +125,7 @@ func TestUnknownSizeCannotUseDirect(t *testing.T) {
 	c := outbound.Client{Redirects: l.Redirects, Transport: round(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"video/mp4"}}, ContentLength: -1, Body: io.NopCloser(strings.NewReader(""))}, nil
 	})}
-	o := (Probe{c, l, d}).Inspect(t.Context(), "douyin", parse.Asset{Kind: "video", Source: "https://cdn.example.test/video"})
+	o := (Probe{Client: c, Limits: l, Domains: d}).Inspect(t.Context(), "douyin", parse.Asset{Kind: "video", Source: "https://cdn.example.test/video"})
 	if o.Direct || o.Reason != "SIZE_UNKNOWN" || o.Size != nil {
 		t.Fatal(o)
 	}
@@ -153,7 +153,7 @@ func TestFinalHostAndRange(t *testing.T) {
 			}
 			return &http.Response{StatusCode: s, Header: h, Body: io.NopCloser(strings.NewReader("")), ContentLength: 2}, nil
 		})}
-		o := (Probe{c, l, d}).Inspect(t.Context(), tc.p, parse.Asset{Kind: "video", Source: "https://source.test/v"})
+		o := (Probe{Client: c, Limits: l, Domains: d}).Inspect(t.Context(), tc.p, parse.Asset{Kind: "video", Source: "https://source.test/v"})
 		if o.Reason != tc.reason || o.Direct != (tc.reason == "OK") || d.host != "final.test" || d.count != 1 {
 			t.Fatal(o, d)
 		}

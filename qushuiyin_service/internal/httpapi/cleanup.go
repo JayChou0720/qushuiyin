@@ -136,6 +136,8 @@ func (s *Mock) cleanDatabase(ctx context.Context, now time.Time) {
 		// Keep opaque IDs for explicit expiry/idempotency responses, but erase
 		// source signatures and content as soon as their short retention ends.
 		for _, q := range []string{
+			"UPDATE save_batch SET state_enc=NULL,version=version+1 WHERE expires_at<=? AND state_enc IS NOT NULL LIMIT ?",
+			"UPDATE save_batch_item SET direct_url_enc=NULL,key_version=NULL,version=version+1 WHERE direct_expires_at<=? AND direct_url_enc IS NOT NULL LIMIT ?",
 			"UPDATE parse_job SET source_url_enc=NULL,version=version+1 WHERE source_expires_at<=? AND source_url_enc IS NOT NULL LIMIT ?",
 			"UPDATE parse_result SET history_url_enc=NULL,title=NULL,description=NULL,author_name=NULL,content_id=NULL WHERE expires_at<=? AND (history_url_enc IS NOT NULL OR title IS NOT NULL OR description IS NOT NULL OR author_name IS NOT NULL OR content_id IS NOT NULL) LIMIT ?",
 			"UPDATE media_asset SET source_candidates_enc='',availability='unavailable',reason_code='MEDIA_SOURCE_EXPIRED',version=version+1 WHERE source_expiry<=? AND source_candidates_enc<>'' LIMIT ?",

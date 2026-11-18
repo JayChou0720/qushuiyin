@@ -16,6 +16,9 @@ import (
 )
 
 type batch struct {
+	ReparseAttempts, RefreshAttempt            int64
+	SourceOverrides                            map[string]sourceSnapshot
+	OutputVersion                              string
 	Version                                    uint64
 	ID, User, ResultID, ClientActionID, Status string
 	FlowID                                     string
@@ -24,13 +27,17 @@ type batch struct {
 	Cancelled                                  bool
 }
 type item struct {
-	FileID, MIME, Hash                  string
-	Size                                int64
-	ID, ObjectID, Status, Mode, Failure string
-	Asset                               asset
-	Attempt                             int64
-	Deadline, AvailableUntil            time.Time
-	Fallback, CopyAvailable             bool
+	DirectURL                                            string `json:"-"`
+	DirectHost                                           string
+	DirectIssuedPending, CopyPending, RelayIssuedPending int64 `json:"-"`
+	FallbackPending                                      bool  `json:"-"`
+	FileID, MIME, Hash                                   string
+	Size                                                 int64
+	ID, ObjectID, Status, Mode, Failure                  string
+	Asset                                                asset
+	Attempt                                              int64
+	Deadline, AvailableUntil                             time.Time
+	Fallback, CopyAvailable                              bool
 }
 type batchRequest struct {
 	ResultID               string
@@ -248,7 +255,7 @@ func (s *Mock) tickets(w http.ResponseWriter, r *http.Request, c credential) {
 			return
 		}
 		expires := x.AvailableUntil
-		if s.Relay != nil {
+		if s.Relay != nil && x.Mode == "relay" {
 			var authorizationExpiry time.Time
 			err := s.Sessions.DB.QueryRowContext(r.Context(), `SELECT LEAST(o.expires_at,f.expires_at,b.expires_at) FROM media_object o JOIN media_file f ON f.id=o.file_id JOIN save_batch_item i ON i.media_object_id=o.id JOIN save_batch b ON b.id=i.batch_id WHERE o.id=? AND o.user_id=? AND i.user_id=? AND b.user_id=? AND b.id=? AND o.status='ready' AND f.status='ready' AND i.prepare_status='READY' AND b.cancel_requested=FALSE AND o.expires_at>UTC_TIMESTAMP(3) AND f.expires_at>UTC_TIMESTAMP(3) AND b.expires_at>UTC_TIMESTAMP(3)`, x.ObjectID, c.User, c.User, c.User, b.ID).Scan(&authorizationExpiry)
 			if errors.Is(err, sql.ErrNoRows) {
@@ -273,7 +280,20 @@ func (s *Mock) tickets(w http.ResponseWriter, r *http.Request, c credential) {
 			fail(w, 410, "MEDIA_SOURCE_EXPIRED")
 			return
 		}
-		out = append(out, dto{"itemId": id, "deliveryMode": x.Mode, "url": s.mediaURL(x.Mode, b.ID, x.ObjectID, c.Digest, expires), "expiresAt": expires})
+		address := s.mediaURL(x.Mode, b.ID, x.ObjectID, c.Digest, expires)
+		if s.Relay != nil && x.Mode == "direct" {
+			var state string
+			if x.DirectURL == "" || s.Sessions.DB.QueryRowContext(r.Context(), "SELECT status FROM download_domain WHERE host=?", x.DirectHost).Scan(&state) != nil || state != "registered" {
+				fail(w, 410, "MEDIA_SOURCE_EXPIRED")
+				return
+			}
+			address = x.DirectURL
+			x.DirectIssuedPending++
+		}
+		if s.Relay != nil && x.Mode == "relay" {
+			x.RelayIssuedPending++
+		}
+		out = append(out, dto{"itemId": id, "deliveryMode": x.Mode, "url": address, "expiresAt": expires})
 	}
 	ok(w, 200, dto{"tickets": out})
 }

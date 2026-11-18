@@ -103,6 +103,8 @@ func (s *Mock) canPrepare(w http.ResponseWriter, b *batch, now time.Time) bool {
 func (s *Mock) requeue(b *batch, x *item, now time.Time) {
 	x.Attempt++
 	x.Status, x.Mode, x.ObjectID, x.Failure, x.CopyAvailable = "PREPARING", "", "", "", false
+	x.DirectURL, x.FileID, x.MIME, x.Hash = "", "", "", ""
+	x.Size = 0
 	x.Deadline = minTime(b.ExpiresAt, now.Add(s.Settings.Seconds("batch_prepare_timeout_seconds")))
 }
 func (s *Mock) retryBatch(w http.ResponseWriter, r *http.Request, c credential) {
@@ -213,6 +215,7 @@ func (s *Mock) fallbackItem(w http.ResponseWriter, r *http.Request, c credential
 		return
 	}
 	x.Fallback = true
+	x.FallbackPending = true
 	s.requeue(b, x, now)
 	b.aggregate()
 	replay.ID = b.ID
@@ -248,9 +251,18 @@ func (s *Mock) copyLink(w http.ResponseWriter, r *http.Request, c credential) {
 		fail(w, 410, "MEDIA_SOURCE_EXPIRED")
 		return
 	}
-	if !s.minute("ticket:"+c.User, s.Settings.Int("user_download_url_requests_per_minute")) || !s.rate("copy:"+c.User, s.Settings.Int("user_copy_link_per_day"), 24*time.Hour) {
+	if !s.minute("ticket:"+c.User, s.Settings.Int("user_download_url_requests_per_minute")) || s.Relay == nil && !s.rate("copy:"+c.User, s.Settings.Int("user_copy_link_per_day"), 24*time.Hour) {
 		fail(w, 429, "RATE_LIMITED")
 		return
 	}
-	ok(w, 200, dto{"url": s.mediaURL("copy", b.ID, x.ObjectID, c.Digest, expires), "expiresAt": expires})
+	address := s.mediaURL("copy", b.ID, x.ObjectID, c.Digest, expires)
+	if s.Relay != nil {
+		if x.DirectURL == "" {
+			fail(w, 410, "MEDIA_SOURCE_EXPIRED")
+			return
+		}
+		address = x.DirectURL
+		x.CopyPending++
+	}
+	ok(w, 200, dto{"url": address, "expiresAt": expires})
 }

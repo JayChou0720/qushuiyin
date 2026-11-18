@@ -32,7 +32,11 @@ type Prepared struct {
 	Size                       int64
 	Expires                    time.Time
 }
+
+var ErrSourceExpired = errors.New("media source expired")
+
 type Relay struct {
+	Domains            Domains
 	DB                 *sql.DB
 	Client             outbound.Client
 	Settings           config.Values
@@ -171,6 +175,9 @@ func (r *Relay) fetch(ctx context.Context, source, kind string) (Prepared, error
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == 403 || resp.StatusCode == 404 || resp.StatusCode == 410 {
+			return out, ErrSourceExpired
+		}
 		return out, errors.New("media source unavailable")
 	}
 	limit := r.Settings.Int("max_image_bytes")

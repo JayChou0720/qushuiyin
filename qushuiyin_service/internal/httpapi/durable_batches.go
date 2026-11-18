@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"qushuiyin/service/internal/auth"
-	"qushuiyin/service/internal/parse"
 )
 
 type bufferedResponse struct {
@@ -45,6 +44,10 @@ func (s *Mock) persistentBatchRequest(w http.ResponseWriter, r *http.Request, c 
 	next(out, r, c)
 	if out.status < 400 {
 		if err := s.saveBatches(r.Context(), c); err != nil {
+			if errors.Is(err, errCopyQuota) {
+				fail(w, 429, "DAILY_LIMIT_REACHED")
+				return
+			}
 			fail(w, 503, "SERVICE_BUSY")
 			return
 		}
@@ -56,22 +59,28 @@ func (s *Mock) persistentBatchRequest(w http.ResponseWriter, r *http.Request, c 
 	_, _ = w.Write(out.body.Bytes())
 }
 func (s *Mock) loadBatches(ctx context.Context, user string) error {
-	rows, err := s.Sessions.DB.QueryContext(ctx, "SELECT id,state_enc,version FROM save_batch WHERE user_id=? AND state_enc IS NOT NULL ORDER BY created_at DESC LIMIT ?", user, s.Settings.Int("memory_parse_cache_max_entries"))
+	rows, err := s.Sessions.DB.QueryContext(ctx, "SELECT id,state_enc,version,expires_at FROM save_batch WHERE user_id=? AND (state_enc IS NOT NULL OR expires_at<=UTC_TIMESTAMP(3)) ORDER BY created_at DESC LIMIT ?", user, s.Settings.Int("memory_parse_cache_max_entries"))
 	if err != nil {
 		return err
 	}
 	loaded := map[string]*batch{}
 	for rows.Next() {
-		var id, enc string
+		var id string
+		var enc sql.NullString
+		var expires time.Time
 		var v uint64
-		if err = rows.Scan(&id, &enc, &v); err != nil {
+		if err = rows.Scan(&id, &enc, &v, &expires); err != nil {
 			rows.Close()
 			return err
 		}
 		b := &batch{}
-		if err = s.openTask(id, "batch", enc, b); err != nil {
-			rows.Close()
-			return err
+		if enc.Valid {
+			if err = s.openTask(id, "batch", enc.String, b); err != nil {
+				rows.Close()
+				return err
+			}
+		} else {
+			b.ID, b.User, b.ExpiresAt = id, user, expires
 		}
 		b.Version = v
 		loaded[id] = b
@@ -80,6 +89,21 @@ func (s *Mock) loadBatches(ctx context.Context, user string) error {
 	rows.Close()
 	if err != nil {
 		return err
+	}
+	for _, b := range loaded {
+		for i := range b.Items {
+			x := &b.Items[i]
+			var enc sql.NullString
+			var expires sql.NullTime
+			if err = s.Sessions.DB.QueryRowContext(ctx, "SELECT direct_url_enc,direct_expires_at FROM save_batch_item WHERE id=? AND user_id=?", x.ID, user).Scan(&enc, &expires); err != nil {
+				return err
+			}
+			if enc.Valid && expires.Valid && time.Now().Before(expires.Time) {
+				if err = s.openTask(x.ID, "direct", enc.String, &x.DirectURL); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	results := map[string]*result{}
 	for _, b := range loaded {
@@ -171,8 +195,12 @@ func (s *Mock) saveBatches(ctx context.Context, c credential) error {
 	if err = s.lockUser(ctx, tx, c); err != nil {
 		return err
 	}
+	windows := map[string]hostWindow{}
+	for k, v := range s.hostWindows {
+		windows[k] = v
+	}
 	for _, b := range s.batches {
-		if b.User != c.User {
+		if b.User != c.User || !time.Now().Before(b.ExpiresAt) {
 			continue
 		}
 		enc, e := s.sealTask(b.ID, "batch", b)
@@ -208,6 +236,12 @@ func (s *Mock) saveBatches(ctx context.Context, c credential) error {
 			if err != nil {
 				return err
 			}
+			if err = s.saveDirect(ctx, tx, b.User, x); err != nil {
+				return err
+			}
+			if err = s.commitDeliverySignals(ctx, tx, b, x, windows); err != nil {
+				return err
+			}
 		}
 	}
 	for composite, rec := range s.keys {
@@ -220,7 +254,12 @@ func (s *Mock) saveBatches(ctx context.Context, c credential) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	deliveryLog(windows, s.hostWindows, s.Settings)
+	s.hostWindows = windows
+	return nil
 }
 
 // A batch item is a durable work unit. A worker only publishes while its
@@ -291,40 +330,10 @@ func (s *Mock) preparePersistentItem(ctx context.Context, owner string) (bool, e
 	} else {
 		call, cancel := context.WithDeadline(ctx, x.Deadline)
 		defer cancel()
-		var source *parse.Asset
-		for i, a := range res.Assets {
-			if a.ID == x.Asset.ID {
-				source = &res.Value.Assets[i]
-				break
-			}
-		}
-		if source == nil && res.Cover != nil && res.Cover.ID == x.Asset.ID {
-			source = res.Value.Cover
-		}
-		if source == nil {
-			return true, errors.New("missing media asset")
-		}
-		content := ""
-		if res.Value.ContentID != nil {
-			content = *res.Value.ContentID
-		}
 		if !time.Now().Before(x.Deadline) {
 			x.Status, x.Failure = "FAILED", "PREPARE_TIMEOUT"
 		} else {
-			file, e := s.Relay.Prepare(call, res.Value.Platform, content, s.adapterVersion(), *source)
-			if e != nil {
-				x.Status, x.Failure = "FAILED", "MEDIA_SOURCE_EXPIRED"
-				if call.Err() != nil {
-					x.Failure = "PREPARE_TIMEOUT"
-				}
-				if e.Error() == "FILE_TOO_LARGE" || e.Error() == "FORMAT_UNSUPPORTED" || e.Error() == "SERVICE_BUSY" {
-					x.Failure = e.Error()
-				}
-			} else {
-				x.Status, x.Mode, x.ObjectID = "READY", "relay", auth.ID()
-				x.FileID, x.MIME, x.Hash, x.Size = file.ID, file.MIME, file.Hash, file.Size
-				x.AvailableUntil = minTime(b.ExpiresAt, file.Expires)
-			}
+			s.prepareDelivery(call, b, x, res)
 		}
 	}
 	return true, s.publishPersistentItem(ctx, owner, seq, b, *x)
@@ -364,6 +373,9 @@ func (s *Mock) publishPersistentItem(ctx context.Context, owner string, seq uint
 	n, _ := changed.RowsAffected()
 	if n != 1 {
 		return nil
+	}
+	if err = s.saveDirect(ctx, tx, b.User, x); err != nil {
+		return err
 	}
 	if x.Status == "READY" && x.FileID != "" {
 		var fileState string

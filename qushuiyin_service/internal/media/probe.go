@@ -20,19 +20,21 @@ type Domains interface {
 	Observe(context.Context, string, string) (string, error)
 }
 type Observation struct {
-	Order  int    `json:"order"`
-	Role   string `json:"role"`
-	Host   string `json:"finalHost,omitempty"`
-	Type   string `json:"contentType,omitempty"`
-	Size   *int64 `json:"sizeBytes"`
-	Domain string `json:"domainStatus"`
-	Direct bool   `json:"directEligible"`
-	Reason string `json:"reason"`
+	FinalURL string `json:"-"`
+	Order    int    `json:"order"`
+	Role     string `json:"role"`
+	Host     string `json:"finalHost,omitempty"`
+	Type     string `json:"contentType,omitempty"`
+	Size     *int64 `json:"sizeBytes"`
+	Domain   string `json:"domainStatus"`
+	Direct   bool   `json:"directEligible"`
+	Reason   string `json:"reason"`
 }
 type Probe struct {
 	Client  outbound.Client
 	Limits  config.Limits
 	Domains Domains
+	Policy  string
 }
 
 var partial = regexp.MustCompile("^bytes ([0-9]+)-([0-9]+)/([0-9]+)$")
@@ -130,6 +132,9 @@ func (p Probe) inspectSource(ctx context.Context, platform string, a parse.Asset
 	}
 	defer resp.Body.Close()
 	o.Host = strings.ToLower(resp.Request.URL.Hostname())
+	if successStatus(resp.StatusCode) {
+		o.FinalURL = resp.Request.URL.String()
+	}
 	if p.Domains != nil {
 		o.Domain, e = p.Domains.Observe(ctx, platform, o.Host)
 		if e != nil {
@@ -168,7 +173,7 @@ func (p Probe) inspectSource(ctx context.Context, platform string, a parse.Asset
 		o.Reason = "SIZE_UNKNOWN"
 	case *o.Size == 0 || *o.Size > limit:
 		o.Reason = "INVALID_SIZE"
-	case platform == "bilibili" && a.Kind == "video":
+	case platform == "bilibili" && a.Kind == "video" && p.Policy == "":
 		o.Reason = "RELAY_ONLY"
 	case o.Domain != "registered":
 		o.Reason = "DOMAIN_NOT_REGISTERED"

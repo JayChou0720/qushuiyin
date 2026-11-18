@@ -29,6 +29,8 @@ type Platform struct {
 	Text   bool   `json:"textEnabled"`
 }
 type Mock struct {
+	refreshSlots     chan struct{}
+	hostWindows      map[string]hostWindow
 	Persistent       bool
 	AdapterTag       string
 	persistentGate   sync.Mutex
@@ -87,6 +89,8 @@ func issue(code string) dto {
 }
 func messageFor(code string) string {
 	switch code {
+	case "CONTENT_CHANGED":
+		return "作品内容已变化，请重新解析"
 	case "FILE_TOO_LARGE":
 		return "文件超过当前可保存大小"
 	case "FORMAT_UNSUPPORTED":
@@ -253,6 +257,8 @@ func (s *Mock) publicConfig(w http.ResponseWriter, r *http.Request) {
 	ok(w, 200, configData)
 }
 func (s *Mock) Handler(ctx context.Context) http.Handler {
+	s.refreshSlots = make(chan struct{}, 1)
+	s.hostWindows = map[string]hostWindow{}
 	s.parseContext = ctx
 	if workers := s.Settings.Int("parser_workers"); workers > 0 {
 		s.parsePool = make(chan struct{}, workers)

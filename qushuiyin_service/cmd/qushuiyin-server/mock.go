@@ -19,6 +19,7 @@ import (
 
 	"qushuiyin/service/internal/auth"
 	"qushuiyin/service/internal/config"
+	store "qushuiyin/service/internal/db"
 	"qushuiyin/service/internal/httpapi"
 	"qushuiyin/service/internal/media"
 	"qushuiyin/service/internal/outbound"
@@ -155,7 +156,7 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 		if e = settings.Validate("media_workers", "media_fetch_timeout_seconds", "relay_max_video_bytes", "max_image_bytes", "max_image_pixels", "max_media_candidates", "media_cache_budget_bytes", "shared_media_max_age_seconds", "global_media_connections", "user_media_connections", "ticket_connections", "global_media_egress_per_day_bytes", "user_media_egress_per_day_bytes", "lease_cleanup_grace_seconds"); e != nil {
 			return e
 		}
-		mock.Relay = &media.Relay{DB: db, Client: outbound.Client{Transport: outbound.Transport(), Redirects: l.Redirects}, Settings: settings, Key: key, Directory: dir, FFprobe: probe}
+		mock.Relay = &media.Relay{Domains: store.Domains{DB: db}, DB: db, Client: outbound.Client{Transport: outbound.Transport(), Redirects: l.Redirects}, Settings: settings, Key: key, Directory: dir, FFprobe: probe}
 	}
 	srv := http.Server{Addr: addr, Handler: mock.Handler(ctx), ReadTimeout: l.Job, WriteTimeout: l.Job, IdleTimeout: settings.Seconds("config_client_cache_seconds")}
 	listener, e := net.Listen("tcp", addr)

@@ -314,7 +314,7 @@ func (s *Mock) parseWorker(ctx context.Context, owner string) {
 					}
 				}
 			}()
-			parsed, e := s.parseCache.resolve(call, p.SourceHash, p.Refresh, func() (*parse.Result, error) { return s.Adapter.Parse(call, p.Source) })
+			parsed, e := s.parseCache.resolve(call, p.SourceHash, p.Refresh, func() (*parse.Result, error) { return s.callParser(call, p.Source) })
 			close(stopped)
 			if ctx.Err() == nil {
 				_ = s.finishParse(ctx, p, parsed, e)

@@ -35,6 +35,12 @@
 
 ## 复查命令与剩余工作
 
+### 直连优先（第一块）
+
+已接入 `direct_preferred/relay_only/copy_only` 策略；最终跳转主机记录到 download_domain，直连地址经轻量探测后加密存储。未登记主机共享整批 `direct_reparse_attempts`，源失效刷新使用独立的一次预算；重试不重置计数。图片对应关系无法确认时返回 CONTENT_CHANGED。
+
+MySQL/Mock 验证：已登记主机不取回完整文件；地址持久化后可恢复；直连回退幂等且只允许一次；超过中转上限的文件只开放本人复制；复制次数跨服务状态写入每日额度；少量回退不改主机状态，达到阈值转 review。发放与回退统计不含源地址。A67、A68、A70、A72 的服务端分支通过；A66 正式版真机直连下载及 A68 真机回退：**待负责人验证**。
+
 配置独立 `MYSQL_TEST_DSN`、`FFPROBE_TEST_PATH` 后，在后端目录运行 `go test -p 1 -count=1 ./...`、`go vet ./...`。启动 Mock 后运行 `node qushuiyin_service/scripts/smoke-mock.mjs 58704`；小程序运行 TypeScript `--noEmit` 检查。
 
-当前真实接口仅开放回环开发环境，实际媒体使用中转。真实预览、直连优先/重新解析/复制链接分支、WebP 转换、活动保存操作租约及完整运营指标仍待后续接入；生产登录、域名登记和 iOS/Android 相册保存另行验收。真实预览暂关闭，WebP 明确返回不支持格式；不以 Mock 样本替代真实输出。
+当前真实接口仅开放回环开发环境。真实预览、WebP 转换、活动保存操作租约及完整运营指标仍待后续接入；生产登录、域名登记和 iOS/Android 相册保存另行验收。真实预览暂关闭，WebP 明确返回不支持格式；不以 Mock 样本替代真实输出。
