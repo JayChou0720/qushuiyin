@@ -9,12 +9,13 @@ export interface Candidate { url: string; displayHost: string; platform: string 
 export interface PublicConfig {
   privacyVersion: string
   features: { mock: boolean; devLogin: boolean }
-  limits: { max_share_text_chars: number; max_image_batch_count: number; client_parse_wait_seconds: number; client_download_timeout_seconds: number; poll_interval_ms: number; feedback_min_chars: number; feedback_max_chars: number; feedback_contact_max_chars: number }
+  limits: { max_share_text_chars: number; max_image_batch_count: number; client_parse_wait_seconds: number; client_download_timeout_seconds: number; poll_interval_ms: number; feedback_min_chars: number; feedback_max_chars: number; feedback_contact_max_chars: number; history_max_count: number; history_ttl_days: number; thumbnail_local_budget_bytes: number }
   platforms: { platform: string; status: string; videoEnabled: boolean; imageEnabled: boolean }[]
 }
 interface Session { userId: string; token: string; expiresAt: string }
 interface CleanupReceipt { accessRevoked: true; cleanupStatus: 'scheduled'; cleanupDeadlineAt: string }
-export interface Job { jobId: string; status: string; pollAfterMs: number; deadlineAt: string; resultId?: string; error?: { message: string; traceId?: string } }
+export interface HistorySource { url: string; key: string }
+export interface Job { jobId: string; status: string; pollAfterMs: number; deadlineAt: string; resultId?: string; historySource?: HistorySource | null; error?: { message: string; traceId?: string; code?: string } }
 export type FeedbackStatus = 'pending' | 'processing' | 'replied' | 'closed'
 export interface FeedbackRequest { category: string; content: string; contact?: string; traceId?: string; includeSource: boolean; sourceUrl?: string }
 export interface FeedbackCreated { feedbackId: string; status: FeedbackStatus; createdAt: string }
@@ -22,13 +23,13 @@ export interface FeedbackSummary { id: string; category: string; summary: string
 export interface FeedbackDetail extends Omit<FeedbackSummary, 'summary'> { content: string; contact: string | null; reply: string | null; repliedAt: string | null }
 interface FeedbackPage { items: FeedbackSummary[]; nextCursor: string | null; hasMore: boolean }
 export interface Asset { assetId: string; type: string; order: number }
-export interface Result { resultId: string; platform: string; mediaType: string; title: string | null; description: string | null; assets: Asset[]; assetCount: number; cover: Asset | null; capabilities: { canPreview: boolean } }
+export interface Result { resultId: string; platform: string; contentId: string | null; mediaType: string; title: string | null; description: string | null; assets: Asset[]; assetCount: number; cover: Asset | null; createdAt: string; expiresAt: string; capabilities: { canPreview: boolean } }
 type PreviewKind = 'video' | 'thumbnail' | 'image'
 export interface BatchItem { itemId: string; order: number; prepareStatus: string; copyLinkAvailable: boolean; error: { message: string; retryable: boolean } | null }
 export interface Batch { batchId: string; status: string; pollAfterMs: number; items: BatchItem[] }
 interface DownloadTicket { itemId: string; deliveryMode: 'relay' | 'direct'; url: string }
 interface Tickets { tickets: DownloadTicket[] }
-export interface Input { shareText: string; selectedUrl: string | null; source: 'paste' | 'manual'; flowId: string }
+export interface Input { shareText: string; selectedUrl: string | null; source: 'paste' | 'manual' | 'history'; flowId: string }
 export class APIError extends Error {
   constructor(readonly code: string, message: string, readonly candidates: Candidate[] = []) { super(message) }
 }
@@ -94,7 +95,7 @@ async function authenticatedRequest<T>(method: Method, path: string, data?: obje
   verifyIdentity()
   const send = async (credential: Session) => {
     verifyIdentity()
-    if (owner && credential.userId !== owner) throw new APIError('FEEDBACK_REFRESH_REQUIRED', '当前使用身份已变更，请刷新列表')
+    if (owner && credential.userId !== owner) throw new APIError('IDENTITY_CHANGED', '当前使用身份已变更，请刷新列表')
     const response = await call<T>(method, path, data, key, credential)
     verifyIdentity()
     return { data: response, userId: credential.userId }
@@ -107,8 +108,20 @@ async function authenticatedRequest<T>(method: Method, path: string, data?: obje
     return send(await login())
   }
 }
-async function request<T>(method: Method, path: string, data?: object, key?: string) {
-  return (await authenticatedRequest<T>(method, path, data, key)).data
+async function request<T>(method: Method, path: string, data?: object, key?: string, owner?: string) {
+  return (await authenticatedRequest<T>(method, path, data, key, owner)).data
+}
+export const isCurrentUser = (userId: string) => !deleting && session?.userId === userId && Date.parse(session.expiresAt) > Date.now()
+export function hasHistoryIdentity() {
+  if (session) return true
+  try { return !!wx.getStorageSync(mockIdentityKey) } catch { return false }
+}
+export async function confirmHistoryIdentity(allowNew = true) {
+  const epoch = identityEpoch
+  if (deleting) throw new Error('正在清除数据，请稍后再试')
+  const { userId } = await login(allowNew)
+  if (epoch !== identityEpoch || !isCurrentUser(userId)) throw new Error('当前使用身份已变更，请重试')
+  return userId
 }
 export async function revokeMyData() {
   if (deleting) throw new Error('正在提交清除请求')
@@ -126,16 +139,16 @@ export async function revokeMyData() {
     deletionTarget = undefined
     let localIdentityCleared = true
     try { wx.removeStorageSync(mockIdentityKey) } catch { localIdentityCleared = false }
-    return { receipt, localIdentityCleared }
+    return { receipt, localIdentityCleared, userId: credential.userId }
   } catch (error) {
     if (deletionTarget && error instanceof ConnectionError) throw new Error('未收到清除结果，可联网后重试')
     throw error
   } finally { deleting = false }
 }
-export const startParse = (input: Input, key: string) => request<Job>('POST', '/v1/parse-jobs', { ...input, forceRefresh: false }, key)
-export const queryJob = (jobId: string) => request<Job>('GET', '/v1/parse-jobs/' + encodeURIComponent(jobId))
-export const cancelJob = (jobId: string) => request<Job>('DELETE', '/v1/parse-jobs/' + encodeURIComponent(jobId))
-export const queryResult = (resultId: string) => request<Result>('GET', '/v1/results/' + encodeURIComponent(resultId))
+export const startParse = (input: Input, key: string, owner?: string) => authenticatedRequest<Job>('POST', '/v1/parse-jobs', { ...input, forceRefresh: false }, key, owner)
+export const queryJob = (jobId: string, owner: string) => request<Job>('GET', '/v1/parse-jobs/' + encodeURIComponent(jobId), undefined, undefined, owner)
+export const cancelJob = (jobId: string, owner: string) => request<Job>('DELETE', '/v1/parse-jobs/' + encodeURIComponent(jobId), undefined, undefined, owner)
+export const queryResult = (resultId: string, owner?: string) => request<Result>('GET', '/v1/results/' + encodeURIComponent(resultId), undefined, undefined, owner)
 export const submitFeedback = (data: FeedbackRequest, key: string) => request<FeedbackCreated>('POST', '/v1/feedbacks', data, key)
 export const queryFeedback = (feedbackId: string) => request<FeedbackDetail>('GET', '/v1/feedbacks/' + encodeURIComponent(feedbackId))
 export const listFeedback = (cursor: string, owner: string) => authenticatedRequest<FeedbackPage>('GET', '/v1/feedbacks' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''), undefined, undefined, owner)

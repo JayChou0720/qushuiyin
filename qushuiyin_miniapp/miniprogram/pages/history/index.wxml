@@ -1,0 +1,33 @@
+<view class="screen stack">
+  <view class="row spread history-heading">
+    <text class="title">最近记录</text>
+    <button wx:if="{{rows.length}}" class="action quiet history-clear" bindtap="clearAll" disabled="{{busy}}" hover-class="button-press">清空记录</button>
+  </view>
+  <text wx:if="{{loading}}" class="muted" role="status">正在读取本机记录</text>
+  <text wx:if="{{error}}" class="error" role="alert">{{error}}</text>
+  <button wx:if="{{error && !rows.length && !loading}}" class="action" bindtap="refresh" hover-class="button-press">重试</button>
+  <text wx:if="{{notice}}" class="muted" role="status">{{notice}}</text>
+  <text wx:if="{{busy}}" class="muted" role="status">正在打开作品</text>
+  <block wx:if="{{!loading && (!error || rows.length)}}">
+    <view class="row spread history-caption">
+      <text class="muted">{{enabled ? '仅存本机 · ' + ttl + ' 天内最近 ' + limit + ' 条' : '已关闭记录 · 保留原有记录'}}</text>
+      <navigator class="action-link quiet-link" url="/pages/privacy/index" hover-class="button-press">记录设置</navigator>
+    </view>
+    <view wx:if="{{!rows.length}}" class="history-empty">
+      <text class="section-title">暂无最近记录</text>
+      <navigator class="action-link primary-link" open-type="navigateBack" hover-class="button-press">返回首页</navigator>
+    </view>
+    <view wx:for="{{rows}}" wx:key="localId" class="history-item">
+      <button class="history-open" bindtap="open" data-id="{{item.localId}}" disabled="{{busy}}" hover-class="button-press" aria-label="打开作品 {{item.title}}">
+        <image wx:if="{{item.thumbnail}}" class="history-thumb" mode="aspectFill" src="{{item.thumbnail}}" binderror="thumbnailError" data-id="{{item.localId}}" />
+        <view wx:else class="history-thumb history-placeholder">{{item.platform}}</view>
+        <view class="history-text">
+          <text class="history-title">{{item.title}}</text>
+          <text class="muted">{{item.platform}} · {{item.meta}}</text>
+          <text wx:if="{{item.summary}}" class="muted">{{item.summary}}</text>
+        </view>
+      </button>
+      <button class="action quiet history-remove" bindtap="remove" data-id="{{item.localId}}" disabled="{{busy}}" hover-class="button-press" aria-label="删除记录 {{item.title}}">删除</button>
+    </view>
+  </block>
+</view>

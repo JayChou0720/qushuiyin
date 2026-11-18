@@ -53,6 +53,12 @@
       "video_url": "https://media.example.test/mixed.mp4"
     }
   },
+  "https://www.xiaohongshu.com/explore/10002?signature=x%2By&token=a%3Db": {
+    "info": { "video_url": "https://media.example.test/sample.mp4", "title": "签名链接演练" }
+  },
+  "https://www.xiaohongshu.com/explore/10002?signature=x%2By&token=a%3Db#share": {
+    "info": { "video_url": "https://media.example.test/sample.mp4", "title": "签名链接演练" }
+  },
   "https://www.xiaohongshu.com/explore/10003": {
     "failure": true
   },

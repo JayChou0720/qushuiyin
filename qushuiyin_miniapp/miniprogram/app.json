@@ -2,6 +2,7 @@
   "pages": [
     "pages/home/index",
     "pages/result/index",
+    "pages/history/index",
     "pages/help/index",
     "pages/feedback/create",
     "pages/feedback/list",

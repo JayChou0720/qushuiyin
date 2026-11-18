@@ -1,9 +1,12 @@
-import { APIError, Candidate, cancelJob, id, loadConfig, queryJob, startParse, wait } from '../../services/api'
+import { APIError, Candidate, cancelJob, id, isCurrentUser, loadConfig } from '../../services/api'
+import { stageHistory } from '../../services/history'
+import { ParseFailure, parseFlow } from '../../services/parse-flow'
 import { takeCleanupNotice } from '../../services/privacy'
 
 const names: Record<string, string> = { douyin: '抖音', xiaohongshu: '小红书', kuaishou: '快手', bilibili: 'B 站' }
 Page({
   data: { text: '', pasted: false, maxLength: 0, parseWait: 0, inputReady: false, busy: false, error: '', job: '', feedbackTrace: '', cleanupNotice: '', sequence: 0, candidates: [] as Candidate[], platforms: [] as { name: string; available: boolean }[] },
+  jobOwner: '',
   onLoad() { this.setData({ cleanupNotice: takeCleanupNotice() }); void this.reloadConfig() },
   onUnload() { void this.cancel() },
   async reloadConfig() {
@@ -26,32 +29,22 @@ Page({
     const sequence = this.data.sequence + 1, flowId = id()
     this.setData({ sequence, busy: true, error: '', candidates: [], job: '', feedbackTrace: '', cleanupNotice: '' })
     try {
-      let job = await startParse({ shareText: this.data.text, selectedUrl, source: this.data.pasted ? 'paste' : 'manual', flowId }, id())
-      if (this.data.sequence !== sequence) { await cancelJob(job.jobId); return }
-      this.setData({ job: job.jobId })
-      const delay = job.pollAfterMs, end = Math.min(Date.parse(job.deadlineAt), Date.now() + this.data.parseWait * 1000)
-      while (job.status === 'QUEUED' || job.status === 'RUNNING') {
-        await wait(delay)
-        if (this.data.sequence !== sequence) return
-        if (Date.now() >= end) { await cancelJob(job.jobId); throw new Error('解析等待超时，请重试') }
-        job = await queryJob(job.jobId)
-      }
-      if (this.data.sequence !== sequence) return
-      if (job.status !== 'SUCCEEDED' || !job.resultId) {
-        this.setData({ feedbackTrace: job.error?.traceId || '' })
-        throw new Error(job.error?.message || '未能取得解析结果')
-      }
-      wx.navigateTo({ url: '/pages/result/index?resultId=' + encodeURIComponent(job.resultId) + '&flowId=' + encodeURIComponent(flowId) })
+      const result = await parseFlow({ shareText: this.data.text, selectedUrl, source: this.data.pasted ? 'paste' : 'manual', flowId }, this.data.parseWait,
+        () => this.data.sequence === sequence, (job, userId) => { this.jobOwner = userId; this.setData({ job }) })
+      if (!result || this.data.sequence !== sequence) return
+      if (result.source) stageHistory({ ...result, source: result.source })
+      wx.navigateTo({ url: '/pages/result/index?resultId=' + encodeURIComponent(result.resultId) + '&flowId=' + encodeURIComponent(flowId) })
     } catch (error) {
       if (this.data.sequence !== sequence) return
-      this.setData({ error: (error as Error).message, candidates: error instanceof APIError ? error.candidates : [] })
+      this.setData({ error: (error as Error).message, candidates: error instanceof APIError ? error.candidates : [], feedbackTrace: error instanceof ParseFailure ? error.traceId : '' })
     } finally {
       if (this.data.sequence === sequence) this.setData({ busy: false, job: '' })
     }
   },
   async cancel() {
-    const job = this.data.job
+    const job = this.data.job, owner = this.jobOwner
+    this.jobOwner = ''
     this.setData({ sequence: this.data.sequence + 1, busy: false, job: '' })
-    if (job) { try { await cancelJob(job) } catch { /* The expired mock job will be removed by the service. */ } }
+    if (job && isCurrentUser(owner)) { try { await cancelJob(job, owner) } catch { /* The expired mock job will be removed by the service. */ } }
   },
 })

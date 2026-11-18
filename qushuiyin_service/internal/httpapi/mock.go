@@ -216,7 +216,7 @@ func (s *Mock) login(w http.ResponseWriter, r *http.Request) {
 	ok(w, 200, sess)
 }
 func (s *Mock) publicConfig(w http.ResponseWriter, r *http.Request) {
-	keys := []string{"max_share_text_chars", "max_candidate_urls", "max_image_batch_count", "client_parse_wait_seconds", "poll_interval_ms", "client_download_timeout_seconds", "max_video_bytes", "max_image_bytes", "feedback_min_chars", "feedback_max_chars", "feedback_contact_max_chars", "pagination_default", "pagination_max", "event_batch_max", "client_queue_max", "client_event_retention_hours"}
+	keys := []string{"max_share_text_chars", "max_candidate_urls", "max_image_batch_count", "client_parse_wait_seconds", "poll_interval_ms", "client_download_timeout_seconds", "max_video_bytes", "max_image_bytes", "feedback_min_chars", "feedback_max_chars", "feedback_contact_max_chars", "pagination_default", "pagination_max", "event_batch_max", "client_queue_max", "client_event_retention_hours", "history_max_count", "history_ttl_days", "thumbnail_local_budget_bytes"}
 	limits := map[string]json.RawMessage{}
 	for _, k := range keys {
 		limits[k] = s.Settings.Data[k]

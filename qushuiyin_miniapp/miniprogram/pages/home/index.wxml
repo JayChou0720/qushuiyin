@@ -19,6 +19,7 @@
     <view class="platforms"><text class="platform {{item.available ? 'available' : ''}}" wx:for="{{platforms}}" wx:key="name">{{item.name}}{{item.available ? '' : ' · 未开放'}}</text></view>
   </view>
   <view wx:if="{{!busy}}" class="row">
+    <navigator class="action-link quiet-link" url="/pages/history/index" hover-class="button-press">最近记录</navigator>
     <navigator class="action-link quiet-link" url="/pages/help/index" hover-class="button-press">使用帮助</navigator>
     <navigator class="action-link quiet-link" url="/pages/privacy/index" hover-class="button-press">数据与隐私</navigator>
   </view>

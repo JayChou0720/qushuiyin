@@ -22,6 +22,9 @@ const request = async (method, path, { data, token, key, origin, expect = 200, c
 const config = await request('GET', '/v1/config')
 assert.equal(config.features.mock, true)
 assert.equal(config.features.devLogin, true)
+for (const name of ['history_max_count','history_ttl_days','thumbnail_local_budget_bytes']) {
+  assert.ok(Number.isSafeInteger(config.limits[name]) && config.limits[name] > 0, name)
+}
 const createSession = () => request('POST','/v1/sessions/wechat',{data:{code:'dev:smoke-'+randomUUID(),clientVersion:'smoke',privacyVersion:config.privacyVersion}})
 const { token } = await createSession()
 const other = (await createSession()).token
@@ -42,6 +45,16 @@ await request('POST','/v1/parse-jobs',{token,data:input(gallery),key,expect:409,
 await request('GET',jobPath(first),{token:other,expect:404,code:'RESOURCE_NOT_FOUND'})
 const read = await request('GET',jobPath(first),{token})
 assert.equal(read.status,'SUCCEEDED')
+assert.equal(read.historySource.url,video)
+assert.match(read.historySource.key,/^[0-9a-f]{64}$/)
+const signed = gallery + '?signature=x%2By&token=a%3Db'
+const signedJob = await create({...input(video + ' ' + signed + '#share'),selectedUrl:signed + '#share',source:'history'})
+const signedSource = (await request('GET', jobPath(signedJob), {token})).historySource
+assert.equal(signedSource.url,signed + '#share')
+const sameLink = await create(input(signed))
+assert.equal((await request('GET', jobPath(sameLink), {token})).historySource.key,signedSource.key)
+const otherJob = await create(input(signed),randomUUID(),other)
+assert.notEqual((await request('GET', jobPath(otherJob), {token:other})).historySource.key,signedSource.key)
 const result = await request('GET',resultPath(read),{token})
 assert.equal(result.mediaType,'video')
 assert.equal(result.assets[0].previewUrl,null)

@@ -24,6 +24,11 @@ type job struct {
 	FlowID                                        string
 	Created, Deadline, Expires                    time.Time
 	Pending                                       *result
+	History                                       *historySource
+}
+type historySource struct {
+	URL string `json:"url"`
+	Key string `json:"key"`
 }
 type asset struct {
 	ID, Kind, Role string
@@ -152,6 +157,11 @@ func (s *Mock) createJob(w http.ResponseWriter, r *http.Request, c credential) {
 			res.Cover = &asset{auth.ID(), x.Kind, x.Role, x.Order}
 		}
 		j.Pending = res
+		// Preserve the selected share URL verbatim for replay. Normalize only the deduplication key.
+		canonical := *u
+		canonical.Host = strings.ToLower(canonical.Host)
+		canonical.Fragment, canonical.RawFragment = "", ""
+		j.History = &historySource{selected, auth.Digest(s.Sessions.Key, "history:"+c.User+":"+canonical.String())}
 	}
 	s.jobs[j.ID] = j
 	record.ID = j.ID
@@ -193,6 +203,7 @@ func (s *Mock) jobStatus(w http.ResponseWriter, r *http.Request, c credential) {
 		}
 	}
 	var e, id any
+	var history *historySource
 	if j.Failure != "" {
 		failure := issue(j.Failure)
 		failure["traceId"] = j.ID
@@ -200,8 +211,10 @@ func (s *Mock) jobStatus(w http.ResponseWriter, r *http.Request, c credential) {
 	}
 	if j.ResultID != "" {
 		id = j.ResultID
+		history = j.History
 	}
-	ok(w, 200, dto{"jobId": j.ID, "status": j.Status, "platform": j.Platform, "resultId": id, "createdAt": j.Created, "deadlineAt": j.Deadline, "error": e})
+	w.Header().Set("Cache-Control", "no-store")
+	ok(w, 200, dto{"jobId": j.ID, "status": j.Status, "platform": j.Platform, "resultId": id, "createdAt": j.Created, "deadlineAt": j.Deadline, "error": e, "historySource": history})
 }
 func (a asset) public() dto {
 	return dto{"assetId": a.ID, "type": a.Kind, "role": a.Role, "order": a.Order, "mimeType": nil, "width": nil, "height": nil, "sizeBytes": nil, "converted": false, "previewUrl": nil, "previewExpiresAt": nil, "availability": "candidate", "reasonCode": nil}

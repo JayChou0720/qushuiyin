@@ -1,4 +1,5 @@
 import { APIError, Asset, Batch, DirectRejected, Result, cancelBatch, copyDownloadURL, downloadSample, fallback, id, loadConfig, previewAsset, queryBatch, queryResult, retryBatch, startBatch, tickets, wait } from '../../services/api'
+import { cacheThumbnail, noteHistorySave, recordHistory, takeHistory } from '../../services/history'
 
 Page({
   data: { result: null as Result | null, flow: '', resultId: '', selected: {} as Record<string, boolean>, count: 0, max: 0, busy: false, error: '', status: '', batchId: '', sequence: 0,
@@ -11,16 +12,26 @@ Page({
   previewExpires: 0,
   previewRefreshed: false,
   disposed: false,
+  historyOwner: '',
   onLoad(query) { this.downloaded = new Set(); this.setData({ resultId: query.resultId || '', flow: query.flowId || id() }); void this.load() },
   onHide() { this.closePreview() },
   onUnload() { this.disposed = true; this.previewSequence++; for (const o of this.observers) o.disconnect(); void this.cancel() },
   async load() {
     try {
-      const [result, config] = await Promise.all([queryResult(this.data.resultId), loadConfig()])
+      const history = takeHistory(this.data.resultId)
+      const [result, config] = await Promise.all([queryResult(this.data.resultId, history?.userId), loadConfig()])
       const selected: Record<string, boolean> = {}
       const max = config.limits.max_image_batch_count
       for (const asset of result.assets.slice(0, max)) selected[asset.assetId] = true
       if (this.disposed) return
+      if (history) {
+        this.historyOwner = history.userId
+        const entry = recordHistory(history, result, config.limits)
+        const thumbnail = result.mediaType === 'video' ? result.cover : result.assets[0]
+        if (entry && thumbnail && result.capabilities.canPreview) {
+          void cacheThumbnail(entry, () => previewAsset(result.resultId, thumbnail.assetId, 'thumbnail'), config.limits)
+        }
+      }
       this.setData({ result, selected, max, count: Object.keys(selected).length, error: '' }, () => this.observeThumbnails(result))
     } catch (error) { if (!this.disposed) this.setData({ error: (error as Error).message }) }
   },
@@ -172,6 +183,7 @@ Page({
         const retryAvailable = failed || incomplete.some(x => x.prepareStatus === 'EXPIRED' || x.error?.retryable)
         const error = incomplete.find(x => !x.copyLinkAvailable && x.error)?.error?.message || (failed ? '部分样本未能下载，请重试' : '')
         const status = incomplete.length === 0 ? '样本已下载，未写入相册' : this.downloaded.size ? '已下载 ' + this.downloaded.size + ' 项，未写入相册' : copyItems.length ? '可复制下载链接' : '演练未完成'
+        if (this.historyOwner) noteHistorySave(this.historyOwner, this.data.resultId, status)
         this.setData({ error, status, copyItems, retryAvailable })
       }
     }
