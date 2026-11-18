@@ -71,3 +71,26 @@ func relaySettings(limit int64) config.Values {
 	data["thumbnail_jpeg_quality"] = json.RawMessage(`80`)
 	return config.Values{Data: data}
 }
+
+func TestVideoRelaySizeErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		length int64
+		want   string
+	}{
+		{"known within download limit", 12, "DIRECT_DOWNLOAD_UNAVAILABLE"},
+		{"known above download limit", 24, "FILE_TOO_LARGE"},
+		{"unknown at relay cutoff", -1, "DIRECT_DOWNLOAD_UNAVAILABLE"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			settings := relaySettings(8)
+			settings.Data["max_video_bytes"] = json.RawMessage(`16`)
+			r := &Relay{Directory: t.TempDir(), Settings: settings, Client: outbound.Client{Transport: relayTransport(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, ContentLength: tc.length, Body: io.NopCloser(bytes.NewReader(make([]byte, 12)))}, nil
+			})}}
+			if _, err := r.fetch(t.Context(), "https://cdn.example.test/video", "video"); err == nil || err.Error() != tc.want {
+				t.Fatalf("got %v, want %s", err, tc.want)
+			}
+		})
+	}
+}

@@ -225,6 +225,13 @@ func (r *Relay) fetchOutput(ctx context.Context, source, kind string, thumbnail 
 	return r.fetchOutputTo(ctx, source, kind, auth.ID()+".media", thumbnail)
 }
 
+func (r *Relay) relaySizeError(kind string, size int64) error {
+	if kind == "video" && size <= r.Settings.Int("max_video_bytes") {
+		return errors.New("DIRECT_DOWNLOAD_UNAVAILABLE")
+	}
+	return errors.New("FILE_TOO_LARGE")
+}
+
 func (r *Relay) fetchOutputTo(ctx context.Context, source, kind, key string, thumbnail bool) (Prepared, error) {
 	var out Prepared
 	resp, err := r.Client.Headers(ctx, source, http.MethodGet, "", func(u *url.URL) bool { return outbound.HTTPS(u) })
@@ -243,7 +250,7 @@ func (r *Relay) fetchOutputTo(ctx context.Context, source, kind, key string, thu
 		limit = r.Settings.Int("relay_max_video_bytes")
 	}
 	if limit <= 0 || resp.ContentLength > limit {
-		return out, errors.New("FILE_TOO_LARGE")
+		return out, r.relaySizeError(kind, resp.ContentLength)
 	}
 	if err = os.MkdirAll(r.Directory, 0700); err != nil {
 		return out, err
@@ -259,8 +266,11 @@ func (r *Relay) fetchOutputTo(ctx context.Context, source, kind, key string, thu
 	if err != nil {
 		return out, err
 	}
-	if n == 0 || n > limit {
-		return out, errors.New("FILE_TOO_LARGE")
+	if n == 0 {
+		return out, errors.New("MEDIA_INVALID")
+	}
+	if n > limit {
+		return out, r.relaySizeError(kind, max(n, resp.ContentLength))
 	}
 	if resp.ContentLength >= 0 && resp.ContentLength != n {
 		return out, errors.New("incomplete media")

@@ -320,7 +320,7 @@ func (s *Mock) prepareDelivery(ctx context.Context, b *batch, x *item, res *pers
 			x.DirectURL = ""
 			return
 		}
-		if e.Error() == "FILE_TOO_LARGE" {
+		if e.Error() == "FILE_TOO_LARGE" || d.Size != nil && x.Asset.Kind == "video" && *d.Size > s.Settings.Int("max_video_bytes") {
 			d.Failure = "FILE_TOO_LARGE"
 		} else {
 			d.Failure = "DIRECT_DOWNLOAD_UNAVAILABLE"
