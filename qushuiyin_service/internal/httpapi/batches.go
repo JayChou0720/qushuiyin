@@ -33,6 +33,7 @@ type item struct {
 	FallbackPending                                      bool  `json:"-"`
 	FileID, MIME, Hash                                   string
 	Size                                                 int64
+	Converted                                            bool
 	ID, ObjectID, Status, Mode, Failure                  string
 	Asset                                                asset
 	Attempt                                              int64
@@ -202,7 +203,7 @@ func (s *Mock) batchStatus(w http.ResponseWriter, r *http.Request, c credential)
 		if x.Failure != "" {
 			failure = issue(x.Failure)
 		}
-		items = append(items, dto{"itemId": x.ID, "assetId": x.Asset.ID, "order": x.Asset.Order, "prepareStatus": x.Status, "deliveryMode": mode, "copyLinkAvailable": x.CopyAvailable && !b.Cancelled, "attempt": x.Attempt, "mediaObjectId": oid, "mimeType": kind, "sizeBytes": size, "converted": false, "error": failure})
+		items = append(items, dto{"itemId": x.ID, "assetId": x.Asset.ID, "order": x.Asset.Order, "prepareStatus": x.Status, "deliveryMode": mode, "copyLinkAvailable": x.CopyAvailable && !b.Cancelled, "attempt": x.Attempt, "mediaObjectId": oid, "mimeType": kind, "sizeBytes": size, "converted": x.Status == "READY" && x.Mode == "relay" && x.Converted, "error": failure})
 	}
 	ok(w, 200, dto{"batchId": b.ID, "status": b.Status, "expiresAt": b.ExpiresAt, "items": items})
 }

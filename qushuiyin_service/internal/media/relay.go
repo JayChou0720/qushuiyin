@@ -26,6 +26,7 @@ import (
 
 type Prepared struct {
 	ID, StorageKey, MIME, Hash string
+	Converted                  bool
 	Size                       int64
 	Expires                    time.Time
 }
@@ -86,7 +87,7 @@ func (r *Relay) prepare(ctx context.Context, platform, contentID, version string
 		break
 	}
 	var existing Prepared
-	err := r.DB.QueryRowContext(ctx, "SELECT id,storage_key,mime_type,size_bytes,sha256,expires_at FROM media_file WHERE share_key=? AND output_version=? AND status='ready' AND expires_at>UTC_TIMESTAMP(3)", share, version).Scan(&existing.ID, &existing.StorageKey, &existing.MIME, &existing.Size, &existing.Hash, &existing.Expires)
+	err := r.DB.QueryRowContext(ctx, "SELECT id,storage_key,mime_type,size_bytes,sha256,converted,expires_at FROM media_file WHERE share_key=? AND output_version=? AND status='ready' AND expires_at>UTC_TIMESTAMP(3)", share, version).Scan(&existing.ID, &existing.StorageKey, &existing.MIME, &existing.Size, &existing.Hash, &existing.Converted, &existing.Expires)
 	if err == nil {
 		if f, e := r.Open(existing.StorageKey); e == nil {
 			info, e := f.Stat()
@@ -127,6 +128,9 @@ func (r *Relay) prepare(ctx context.Context, platform, contentID, version string
 		}
 		file, e := r.fetchOutput(ctx, source, a.Kind, thumbnail)
 		if e != nil {
+			if errors.Is(e, errAnimatedWebP) {
+				return Prepared{}, e
+			}
 			last = e
 			continue
 		}
@@ -142,7 +146,7 @@ func (r *Relay) prepare(ctx context.Context, platform, contentID, version string
 		}
 		_, e = tx.ExecContext(ctx, "UPDATE media_file SET share_key=NULL WHERE share_key=? AND output_version=?", share, version)
 		if e == nil {
-			_, e = tx.ExecContext(ctx, "INSERT INTO media_file(id,share_key,output_version,storage_key,status,mime_type,size_bytes,sha256,ready_at,expires_at,last_access_at) VALUES (?,?,?,?,'ready',?,?,?,?,?,?)", file.ID, share, version, file.StorageKey, file.MIME, file.Size, file.Hash, now, file.Expires, now)
+			_, e = tx.ExecContext(ctx, "INSERT INTO media_file(id,share_key,output_version,storage_key,status,mime_type,size_bytes,sha256,converted,ready_at,expires_at,last_access_at) VALUES (?,?,?,?,'ready',?,?,?,?,?,?,?)", file.ID, share, version, file.StorageKey, file.MIME, file.Size, file.Hash, file.Converted, now, file.Expires, now)
 		}
 		if e == nil {
 			e = tx.Commit()
@@ -223,14 +227,15 @@ func (r *Relay) fetchOutput(ctx context.Context, source, kind string, thumbnail 
 		return out, err
 	}
 	actual := sniffMedia(part, 12)
+	if kind == "video" && actual != "video/mp4" || kind != "video" && actual != "image/jpeg" && actual != "image/png" && actual != "image/webp" {
+		return out, errors.New("FORMAT_UNSUPPORTED")
+	}
+	converted := actual == "image/webp"
 	declared, generic := contentType(resp)
 	if !generic && declared != actual {
 		return out, errors.New("media MIME mismatch")
 	}
 	if kind == "video" {
-		if actual != "video/mp4" {
-			return out, errors.New("FORMAT_UNSUPPORTED")
-		}
 		if err = r.validateVideo(ctx, path); err != nil {
 			return out, err
 		}
@@ -249,6 +254,9 @@ func (r *Relay) fetchOutput(ctx context.Context, source, kind string, thumbnail 
 	if err != nil || n == 0 || n > limit {
 		return out, errors.New("FILE_TOO_LARGE")
 	}
+	if err = ctx.Err(); err != nil {
+		return out, err
+	}
 	if err = part.Sync(); err != nil {
 		return out, err
 	}
@@ -259,7 +267,7 @@ func (r *Relay) fetchOutput(ctx context.Context, source, kind string, thumbnail 
 	if err = os.Rename(path, filepath.Join(r.Directory, key)); err != nil {
 		return out, err
 	}
-	return Prepared{StorageKey: key, MIME: actual, Size: n, Hash: hex.EncodeToString(digest.Sum(nil))}, nil
+	return Prepared{StorageKey: key, MIME: actual, Size: n, Hash: hex.EncodeToString(digest.Sum(nil)), Converted: converted}, nil
 }
 
 type limitedProbeOutput struct {

@@ -104,6 +104,7 @@ func (s *Mock) requeue(b *batch, x *item, now time.Time) {
 	x.Attempt++
 	x.Status, x.Mode, x.ObjectID, x.Failure, x.CopyAvailable = "PREPARING", "", "", "", false
 	x.DirectURL, x.FileID, x.MIME, x.Hash = "", "", "", ""
+	x.Converted = false
 	x.Size = 0
 	x.Deadline = minTime(b.ExpiresAt, now.Add(s.Settings.Seconds("batch_prepare_timeout_seconds")))
 }

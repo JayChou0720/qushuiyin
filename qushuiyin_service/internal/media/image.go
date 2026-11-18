@@ -6,11 +6,12 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
-	_ "image/png"
+	"image/png"
 	"io"
 	"os"
 
 	"golang.org/x/image/draw"
+	_ "golang.org/x/image/webp"
 )
 
 func (r *Relay) imageWork(ctx context.Context) (func(), error) {
@@ -34,7 +35,7 @@ func (r *Relay) imageWork(ctx context.Context) (func(), error) {
 }
 
 func (r *Relay) processImage(ctx context.Context, f *os.File, mime string, thumbnail bool) (string, error) {
-	if mime != "image/jpeg" && mime != "image/png" {
+	if mime != "image/jpeg" && mime != "image/png" && mime != "image/webp" {
 		return "", errors.New("FORMAT_UNSUPPORTED")
 	}
 	release, err := r.imageWork(ctx)
@@ -42,47 +43,63 @@ func (r *Relay) processImage(ctx context.Context, f *os.File, mime string, thumb
 		return "", err
 	}
 	defer release()
+	alpha := false
+	if mime == "image/webp" {
+		alpha, err = inspectWebP(ctx, f, r.Settings.Int("max_image_pixels"))
+		if err != nil {
+			return "", err
+		}
+	}
 	if _, err = f.Seek(0, io.SeekStart); err != nil {
 		return "", err
 	}
 	cfg, _, err := image.DecodeConfig(f)
 	if err != nil {
-		return "", err
+		return "", errors.New("FORMAT_UNSUPPORTED")
 	}
 	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width) > r.Settings.Int("max_image_pixels")/int64(cfg.Height) {
-		return "", errors.New("image pixel limit")
+		return "", errors.New("FORMAT_UNSUPPORTED")
 	}
 	if _, err = f.Seek(0, io.SeekStart); err != nil {
 		return "", err
 	}
 	img, _, err := image.Decode(f)
 	if err != nil {
-		return "", err
+		return "", errors.New("FORMAT_UNSUPPORTED")
+	}
+	if img.Bounds().Dx() != cfg.Width || img.Bounds().Dy() != cfg.Height {
+		return "", errors.New("FORMAT_UNSUPPORTED")
 	}
 	if err = ctx.Err(); err != nil {
 		return "", err
 	}
-	if !thumbnail {
+	if !thumbnail && mime != "image/webp" {
 		return mime, nil
 	}
-	edge := r.Settings.Int("thumbnail_max_edge_px")
 	quality := r.Settings.Int("thumbnail_jpeg_quality")
-	if edge <= 0 || quality < 1 || quality > 100 {
+	if quality < 1 || quality > 100 {
 		return "", errors.New("SERVICE_BUSY")
 	}
-	w, h := cfg.Width, cfg.Height
-	if int64(max(w, h)) > edge {
-		if w >= h {
-			h = max(1, int(int64(h)*edge/int64(w)))
-			w = int(edge)
-		} else {
-			w = max(1, int(int64(w)*edge/int64(h)))
-			h = int(edge)
+	if thumbnail {
+		edge := r.Settings.Int("thumbnail_max_edge_px")
+		if edge <= 0 {
+			return "", errors.New("SERVICE_BUSY")
 		}
+		w, h := cfg.Width, cfg.Height
+		if int64(max(w, h)) > edge {
+			if w >= h {
+				h = max(1, int(int64(h)*edge/int64(w)))
+				w = int(edge)
+			} else {
+				w = max(1, int(int64(w)*edge/int64(h)))
+				h = int(edge)
+			}
+		}
+		thumb := image.NewRGBA(image.Rect(0, 0, w, h))
+		draw.Draw(thumb, thumb.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
+		draw.CatmullRom.Scale(thumb, thumb.Bounds(), img, img.Bounds(), draw.Over, nil)
+		img = thumb
 	}
-	thumb := image.NewRGBA(image.Rect(0, 0, w, h))
-	draw.Draw(thumb, thumb.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
-	draw.CatmullRom.Scale(thumb, thumb.Bounds(), img, img.Bounds(), draw.Over, nil)
 	if err = ctx.Err(); err != nil {
 		return "", err
 	}
@@ -92,16 +109,24 @@ func (r *Relay) processImage(ctx context.Context, f *os.File, mime string, thumb
 	if _, err = f.Seek(0, io.SeekStart); err != nil {
 		return "", err
 	}
-	err = jpeg.Encode(&boundedImageWriter{w: f, left: r.Settings.Int("max_image_bytes")}, thumb, &jpeg.Options{Quality: int(quality)})
+	w := &boundedImageWriter{w: f, left: r.Settings.Int("max_image_bytes"), ctx: ctx}
+	if alpha && !thumbnail {
+		return "image/png", png.Encode(w, img)
+	}
+	err = jpeg.Encode(w, img, &jpeg.Options{Quality: int(quality)})
 	return "image/jpeg", err
 }
 
 type boundedImageWriter struct {
 	w    io.Writer
 	left int64
+	ctx  context.Context
 }
 
 func (w *boundedImageWriter) Write(p []byte) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
 	if int64(len(p)) > w.left {
 		return 0, errors.New("FILE_TOO_LARGE")
 	}

@@ -299,6 +299,7 @@ func (s *Mock) prepareDelivery(ctx context.Context, b *batch, x *item, res *pers
 			x.Status, x.Mode, x.Failure = "READY", "relay", ""
 			x.ObjectID = auth.ID()
 			x.FileID, x.MIME, x.Hash, x.Size = file.ID, file.MIME, file.Hash, file.Size
+			x.Converted = file.Converted
 			x.AvailableUntil = minTime(b.ExpiresAt, file.Expires)
 			x.DirectURL = ""
 			return
