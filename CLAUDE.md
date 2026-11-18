@@ -49,7 +49,7 @@ Target server: 2 cores / 2 GB / 50 GB SSD with MySQL on the same box (tuning and
 ## Mini-program commands
 
 - Source root is `qushuiyin_miniapp/miniprogram/` (see `project.config.json`). TS is compiled by WeChat DevTools' built-in `typescript` plugin. There is no npm build, lint or test script.
-- Build, preview and upload through WeChat DevTools. Type-check from the CLI with `npx tsc --noEmit -p qushuiyin_miniapp` (run `npm install` first for `miniprogram-api-typings`). tsconfig is strict, with `noUnusedLocals` and `noUnusedParameters` enabled.
+- Build, preview and upload through WeChat DevTools. Type-check from the CLI with `cd qushuiyin_miniapp && npm install && npx tsc --noEmit -p .` (TypeScript is a devDependency; running `npx tsc` where it isn't installed fetches an unrelated npm package called `tsc`). tsconfig is strict, with `noUnusedLocals` and `noUnusedParameters` enabled.
 - Uses `glass-easel` with Skyline rendering enabled and `lazyCodeLoading: requiredComponents`.
 - Target routes (spec §3.1): `pages/home/index`, `pages/result/index`, `pages/history/index`, `pages/help/index`, `pages/feedback/{create,list,detail}`, `pages/privacy/index`. Single home page, no TabBar.
 - `pages/` holds UI state only. `services/` holds api, session, privacy, download, album, history and telemetry. Platform parsing rules never live in the client.
