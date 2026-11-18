@@ -14,15 +14,15 @@ import (
 
 type preview struct {
 	user, session, resultID, kind string
+	assetID                       string
+	version                       int64
 	expires                       time.Time
 	remaining                     int64
 }
 
 func (s *Mock) previewTickets(w http.ResponseWriter, r *http.Request, c credential) {
-	// Until the separate bounded preview pipeline is ready, live results must
-	// never return the synthetic media used by local Mock previews.
 	if s.Relay != nil {
-		fail(w, 503, "DIRECT_DOWNLOAD_UNAVAILABLE")
+		s.livePreviewTickets(w, r, c)
 		return
 	}
 	var req struct{ AssetIDs []string }
@@ -90,7 +90,7 @@ func (s *Mock) previewTickets(w http.ResponseWriter, r *http.Request, c credenti
 			entries = append(entries, dto{"assetId": a.ID, "mode": "relay", "url": nil, "expiresAt": nil, "reasonCode": "MEDIA_TOO_LARGE"})
 			continue
 		}
-		s.previews[id] = &preview{c.User, c.Digest, res.ID, a.Kind, expires, limit}
+		s.previews[id] = &preview{user: c.User, session: c.Digest, resultID: res.ID, kind: a.Kind, expires: expires, remaining: limit}
 		var path string
 		if a.Kind == "video" {
 			path = "preview"
@@ -109,9 +109,17 @@ func (s *Mock) previewSignature(path, id string) string {
 
 func (s *Mock) previewMedia(path string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		purpose := path
+		if s.Relay != nil {
+			s.livePreviewMedia(w, r, purpose)
+			return
+		}
+		if purpose == "image" {
+			purpose = "thumbnail"
+		}
 		id := r.PathValue("previewId")
 		signature := r.URL.Query().Get("t")
-		if len(id) > 64 || !hmac.Equal([]byte(signature), []byte(s.previewSignature(path, id))) {
+		if len(id) > 64 || !hmac.Equal([]byte(signature), []byte(s.previewSignature(purpose, id))) {
 			fail(w, 403, "ACCESS_DENIED")
 			return
 		}
@@ -124,7 +132,7 @@ func (s *Mock) previewMedia(path string) http.HandlerFunc {
 		}
 		user, session, kind := item.user, item.session, item.kind
 		s.mu.Unlock()
-		if (path == "preview") != (kind == "video") {
+		if (purpose == "preview") != (kind == "video") {
 			fail(w, 403, "ACCESS_DENIED")
 			return
 		}

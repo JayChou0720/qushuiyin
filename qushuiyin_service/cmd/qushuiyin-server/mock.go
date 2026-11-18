@@ -153,7 +153,7 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 		if st, err := os.Stat(probe); err != nil || !st.Mode().IsRegular() {
 			return errors.New("ffprobe executable unavailable")
 		}
-		if e = settings.Validate("media_workers", "media_fetch_timeout_seconds", "relay_max_video_bytes", "max_image_bytes", "max_image_pixels", "max_media_candidates", "media_cache_budget_bytes", "shared_media_max_age_seconds", "global_media_connections", "user_media_connections", "ticket_connections", "global_media_egress_per_day_bytes", "user_media_egress_per_day_bytes", "lease_cleanup_grace_seconds"); e != nil {
+		if e = settings.Validate("image_convert_workers", "thumbnail_max_edge_px", "thumbnail_jpeg_quality", "thumbnail_generate_timeout_seconds", "ticket_byte_budget_multiplier", "media_workers", "media_fetch_timeout_seconds", "relay_max_video_bytes", "max_image_bytes", "max_image_pixels", "max_media_candidates", "media_cache_budget_bytes", "shared_media_max_age_seconds", "global_media_connections", "user_media_connections", "ticket_connections", "global_media_egress_per_day_bytes", "user_media_egress_per_day_bytes", "lease_cleanup_grace_seconds"); e != nil {
 			return e
 		}
 		mock.Relay = &media.Relay{Domains: store.Domains{DB: db}, DB: db, Client: outbound.Client{Transport: outbound.Transport(), Redirects: l.Redirects}, Settings: settings, Key: key, Directory: dir, FFprobe: probe}

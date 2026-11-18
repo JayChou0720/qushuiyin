@@ -38,6 +38,7 @@ type Mock struct {
 	TaskKeyVersion   string
 	Relay            *media.Relay
 	mediaConnections map[string]int64
+	byteBudgets      map[string]*ticketBudget
 	Admin            auth.AdminStore
 	AdminHost        string
 	AdminOrigins     map[string]bool
@@ -244,7 +245,7 @@ func (s *Mock) publicConfig(w http.ResponseWriter, r *http.Request) {
 	for _, k := range keys {
 		limits[k] = s.Settings.Data[k]
 	}
-	configData := dto{"platforms": s.Platforms, "limits": limits, "features": dto{"mock": s.Relay == nil, "devLogin": s.DevLogin, "directPreviewEnabled": false}, "privacyVersion": privacyVersion, "notice": "", "help": dto{}, "serviceStatus": "normal"}
+	configData := dto{"platforms": s.Platforms, "limits": limits, "features": dto{"mock": s.Relay == nil, "devLogin": s.DevLogin, "directPreviewEnabled": s.Settings.Bool("direct_preview_enabled")}, "privacyVersion": privacyVersion, "notice": "", "help": dto{}, "serviceStatus": "normal"}
 	raw, _ := json.Marshal(configData)
 	etag := auth.Digest(s.Sessions.Key, string(raw))
 	w.Header().Set("ETag", "\""+etag+"\"")
@@ -306,7 +307,7 @@ func (s *Mock) Handler(ctx context.Context) http.Handler {
 	m.HandleFunc("GET /media/mock-source/copy/{mediaObjectId}", s.download("copy"))
 	m.HandleFunc("GET /media/preview/{previewId}", s.previewMedia("preview"))
 	m.HandleFunc("GET /media/thumbnail/{previewId}", s.previewMedia("thumbnail"))
-	m.HandleFunc("GET /media/image/{previewId}", s.previewMedia("thumbnail"))
+	m.HandleFunc("GET /media/image/{previewId}", s.previewMedia("image"))
 	m.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { fail(w, 404, "RESOURCE_NOT_FOUND") })
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Keep a request authenticated just before deletion from repopulating the mock store.

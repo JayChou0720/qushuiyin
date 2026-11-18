@@ -166,10 +166,12 @@ export async function previewAsset(resultId: string, assetId: string, kind: Prev
   const { previews } = await request<{ previews: { assetId: string; mode: string; url: string | null; expiresAt: string | null }[] }>('POST', '/v1/results/' + encodeURIComponent(resultId) + '/preview-tickets', { assetIds: [assetId] })
   const entry = previews.find(p => p.assetId === assetId)
   const prefix = origin() + '/media/' + (kind === 'video' ? 'preview' : 'thumbnail') + '/'
-  if (entry?.mode !== 'relay' || !entry.url?.startsWith(prefix) || !entry.expiresAt) throw new Error('预览暂不可用')
+  if (!entry?.url || !entry.expiresAt) throw new Error('预览暂不可用')
+  const direct = entry.mode === 'direct' && /^https:\/\/[^/@?#]+\//.test(entry.url)
+  if (!direct && (entry.mode !== 'relay' || !entry.url.startsWith(prefix))) throw new Error('预览暂不可用')
   const expires = Date.parse(entry.expiresAt)
   if (!Number.isFinite(expires) || expires <= Date.now()) throw new Error('预览地址已过期')
-  return { url: kind === 'image' ? origin() + '/media/image/' + entry.url.slice(prefix.length) : entry.url, expires }
+  return { url: !direct && kind === 'image' ? origin() + '/media/image/' + entry.url.slice(prefix.length) : entry.url, expires }
 }
 export const startBatch = (resultId: string, assetIds: string[], flowId: string, actionId: string) => request<Batch>('POST', '/v1/save-batches', { resultId, assetIds, clientActionId: actionId, flowId }, actionId)
 export const queryBatch = (batchId: string) => request<Batch>('GET', '/v1/save-batches/' + encodeURIComponent(batchId))

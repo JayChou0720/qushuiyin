@@ -7,9 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"image"
-	_ "image/jpeg"
-	_ "image/png"
 	"io"
 	"net/http"
 	"net/url"
@@ -46,11 +43,22 @@ type Relay struct {
 	pending            map[string]chan struct{}
 	active             map[string]int
 	reserved           int64
+	imageSlots         chan struct{}
 }
 
 // Only this module chooses paths. Storage keys and source candidates never
 // originate in download requests. Each caller is a bounded media worker.
 func (r *Relay) Prepare(ctx context.Context, platform, contentID, version string, a parse.Asset) (Prepared, error) {
+	return r.prepare(ctx, platform, contentID, version, a, false)
+}
+
+func (r *Relay) PrepareThumbnail(ctx context.Context, platform, contentID string, a parse.Asset) (Prepared, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.Settings.Seconds("thumbnail_generate_timeout_seconds"))
+	defer cancel()
+	return r.prepare(ctx, platform, contentID, "thumb-"+strconv.FormatInt(r.Settings.Int("thumbnail_max_edge_px"), 10), a, true)
+}
+
+func (r *Relay) prepare(ctx context.Context, platform, contentID, version string, a parse.Asset, thumbnail bool) (Prepared, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.Settings.Seconds("media_fetch_timeout_seconds"))
 	defer cancel()
 	share := auth.Digest(r.Key, platform+":"+contentID+":"+a.Role+":"+strconv.Itoa(a.Order)+":"+version)
@@ -117,7 +125,7 @@ func (r *Relay) Prepare(ctx context.Context, platform, contentID, version string
 		if int64(i) >= r.Settings.Int("max_media_candidates") {
 			break
 		}
-		file, e := r.fetch(ctx, source, a.Kind)
+		file, e := r.fetchOutput(ctx, source, a.Kind, thumbnail)
 		if e != nil {
 			last = e
 			continue
@@ -168,6 +176,10 @@ func (r *Relay) Open(key string) (*os.File, error) {
 	return os.Open(path)
 }
 func (r *Relay) fetch(ctx context.Context, source, kind string) (Prepared, error) {
+	return r.fetchOutput(ctx, source, kind, false)
+}
+
+func (r *Relay) fetchOutput(ctx context.Context, source, kind string, thumbnail bool) (Prepared, error) {
 	var out Prepared
 	resp, err := r.Client.Headers(ctx, source, http.MethodGet, "", func(u *url.URL) bool { return outbound.HTTPS(u) })
 	if err != nil {
@@ -211,6 +223,10 @@ func (r *Relay) fetch(ctx context.Context, source, kind string) (Prepared, error
 		return out, err
 	}
 	actual := sniffMedia(part, 12)
+	declared, generic := contentType(resp)
+	if !generic && declared != actual {
+		return out, errors.New("media MIME mismatch")
+	}
 	if kind == "video" {
 		if actual != "video/mp4" {
 			return out, errors.New("FORMAT_UNSUPPORTED")
@@ -219,30 +235,19 @@ func (r *Relay) fetch(ctx context.Context, source, kind string) (Prepared, error
 			return out, err
 		}
 	} else {
-		if actual != "image/jpeg" && actual != "image/png" {
-			return out, errors.New("FORMAT_UNSUPPORTED")
-		}
-		if _, err = part.Seek(0, io.SeekStart); err != nil {
-			return out, err
-		}
-		cfg, _, e := image.DecodeConfig(part)
-		if e != nil {
-			return out, e
-		}
-		if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width) > r.Settings.Int("max_image_pixels")/int64(cfg.Height) {
-			return out, errors.New("image pixel limit")
-		}
-		if _, err = part.Seek(0, io.SeekStart); err != nil {
-			return out, err
-		}
-		if _, _, err = image.Decode(part); err != nil {
+		actual, err = r.processImage(ctx, part, actual, thumbnail)
+		if err != nil {
 			return out, err
 		}
 	}
-	// A declared non-generic MIME must agree with the actual file format.
-	declared, generic := contentType(resp)
-	if !generic && declared != actual {
-		return out, errors.New("media MIME mismatch")
+	// Hash and byte count always describe the final immutable output.
+	if _, err = part.Seek(0, io.SeekStart); err != nil {
+		return out, err
+	}
+	digest.Reset()
+	n, err = io.Copy(digest, io.LimitReader(part, limit+1))
+	if err != nil || n == 0 || n > limit {
+		return out, errors.New("FILE_TOO_LARGE")
 	}
 	if err = part.Sync(); err != nil {
 		return out, err

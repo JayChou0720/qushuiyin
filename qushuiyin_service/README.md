@@ -52,7 +52,9 @@ node ./scripts/smoke-events.cjs $historyBuild 18080
 
 本地真实解析与中转使用 `APP_ENV=local`、`PARSE_MODE=live`、`WECHAT_DEV_LOGIN=true`，设置回环 `HTTP_ADDR`，清除 `MOCK_MEDIA_ORIGIN`。此外设置绝对路径 `MEDIA_DIR` 与 `FFPROBE_PATH`，例如 `D:\FFmpeg\bin\ffprobe.exe`，再运行 `qushuiyin-server serve`。只有开发、测试环境可运行这一入口。真实微信登录与生产入口尚未开放。
 
-媒体按平台策略优先直连已登记主机，否则共享整批重新解析预算，再尝试中转或提供本人复制链接。地址加密保存，fallback 只允许一次且幂等；主机达到回退阈值后转 review。中转通过实际 GET、字节数、魔数及 ffprobe 校验；下载支持 HEAD 和单段 Range。JPEG/PNG 做完整解码和像素限制。WebP 转换和真实预览待下一步接入。
+媒体按平台策略优先直连已登记主机，否则共享整批重新解析预算，再尝试中转或提供本人复制链接。地址加密保存，fallback 只允许一次且幂等；主机达到回退阈值后转 review。中转通过实际 GET、字节数、魔数及 ffprobe 校验；下载支持 HEAD 和单段 Range。JPEG/PNG 做完整解码和像素限制。WebP 转换待下一步接入。
+
+预览按需申请 preview-tickets，视频输出受限 Range，图片第一次请求才生成共享 JPEG 缩略图；放大走独立用途签名的大图接口。预览共用连接保护与 MySQL 出站额度，票据还限制累计字节。direct_preview_enabled 默认 false，真机验证后才开启。测试使用录制响应，不连续请求真实平台。
 
 MySQL 验证用 `MYSQL_TEST_DSN` 指向独立的回环 `qushuiyin_test` 库。设置 `FFPROBE_TEST_PATH` 后运行 `go test -p 1 ./...`，可执行任务恢复、幂等、取消竞争、旧媒体租约回写、文件复用、Range 和清理测试。`-p 1` 防止多个包同时迁移同一个测试库。
 

@@ -4,10 +4,63 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 	"time"
 
 	"qushuiyin/service/internal/auth"
 )
+
+type ticketBudget struct {
+	expires        time.Time
+	used, reserved int64
+}
+
+// Reservation prevents concurrent ranges from multiplying a bearer's allowance.
+func (s *Mock) reservePreviewBytes(ctx context.Context, user, key string, expires time.Time, n, limit int64) (func(int64), error) {
+	s.mu.Lock()
+	if s.byteBudgets == nil {
+		s.byteBudgets = map[string]*ticketBudget{}
+	}
+	now := time.Now()
+	for k, b := range s.byteBudgets {
+		if !now.Before(b.expires) && b.reserved == 0 {
+			delete(s.byteBudgets, k)
+		}
+	}
+	b := s.byteBudgets[key]
+	if b == nil {
+		if int64(len(s.byteBudgets)) >= s.Settings.Int("memory_parse_cache_max_entries") {
+			s.mu.Unlock()
+			return nil, errors.New("SERVICE_BUSY")
+		}
+		b = &ticketBudget{expires: expires}
+		s.byteBudgets[key] = b
+	}
+	if n < 0 || n > limit-b.used-b.reserved || !now.Before(expires) {
+		s.mu.Unlock()
+		return nil, errors.New("RATE_LIMITED")
+	}
+	b.reserved += n
+	s.mu.Unlock()
+	settle, err := s.reserveEgress(ctx, user, n)
+	if err != nil {
+		s.mu.Lock()
+		b.reserved -= n
+		s.mu.Unlock()
+		return nil, err
+	}
+	var once sync.Once
+	return func(actual int64) {
+		once.Do(func() {
+			actual = max(0, min(actual, n))
+			s.mu.Lock()
+			b.reserved -= n
+			b.used += actual
+			s.mu.Unlock()
+			settle(actual)
+		})
+	}, nil
+}
 
 func (s *Mock) acquireMedia(user, ticket string) (func(), bool) {
 	s.mu.Lock()

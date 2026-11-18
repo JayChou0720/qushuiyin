@@ -66,5 +66,8 @@ func relaySettings(limit int64) config.Values {
 		b, _ := json.Marshal(v)
 		data[k] = b
 	}
+	data["image_convert_workers"] = json.RawMessage(`1`)
+	data["thumbnail_max_edge_px"] = json.RawMessage(`480`)
+	data["thumbnail_jpeg_quality"] = json.RawMessage(`80`)
 	return config.Values{Data: data}
 }

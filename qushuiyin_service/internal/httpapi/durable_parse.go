@@ -8,11 +8,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 
 	"qushuiyin/service/internal/auth"
 	"qushuiyin/service/internal/parse"
@@ -175,20 +178,43 @@ func (s *Mock) createPersistentParse(w http.ResponseWriter, r *http.Request, c c
 }
 
 func (s *Mock) claimParse(ctx context.Context, owner string) (*persistentParse, error) {
-	tx, err := s.Sessions.DB.BeginTx(ctx, nil)
+	// Expiry is an independent commit, even when no work can be claimed.
+	_, err := s.Sessions.DB.ExecContext(ctx, "UPDATE parse_job SET status=IF(cancel_requested,'CANCELLED','FAILED'),error_code=IF(cancel_requested,NULL,'PARSE_TIMEOUT'),finished_at=UTC_TIMESTAMP(3),version=version+1 WHERE status IN ('QUEUED','RUNNING') AND (deadline_at<=UTC_TIMESTAMP(3) OR cancel_requested)")
+	if err != nil {
+		return nil, err
+	}
+	// A queue scan must not retain repeatable-read gap locks across publication.
+	tx, err := s.Sessions.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, "UPDATE parse_job SET status=IF(cancel_requested,'CANCELLED','FAILED'),error_code=IF(cancel_requested,NULL,'PARSE_TIMEOUT'),version=version+1 WHERE status IN ('QUEUED','RUNNING') AND (deadline_at<=UTC_TIMESTAMP(3) OR cancel_requested)")
+	p := &persistentParse{Job: &job{}, Owner: owner}
+	var enc string
+	// Lock only jobs. A joined/subquery user check can be flattened by MySQL,
+	// locking users after jobs and deadlocking publication's user-first order.
+	err = tx.QueryRowContext(ctx, `SELECT j.id,j.user_id,j.platform,j.flow_id,j.created_at,j.deadline_at,j.expires_at,j.source_url_enc,j.source_hash,j.force_refresh,j.claim_seq FROM parse_job j WHERE j.adapter_version=? AND j.cancel_requested=FALSE AND j.deadline_at>UTC_TIMESTAMP(3) AND (j.status='QUEUED' OR (j.status='RUNNING' AND j.lease_expires_at<=UTC_TIMESTAMP(3))) ORDER BY j.created_at,j.id LIMIT 1 FOR UPDATE SKIP LOCKED`, s.adapterVersion()).Scan(&p.Job.ID, &p.Job.User, &p.Job.Platform, &p.Job.FlowID, &p.Job.Created, &p.Job.Deadline, &p.Job.Expires, &enc, &p.SourceHash, &p.Refresh, &p.Claim)
+	if errors.Is(err, sql.ErrNoRows) {
+		if e := tx.Commit(); e != nil {
+			return nil, e
+		}
+		return nil, err
+	}
 	if err != nil {
 		return nil, err
 	}
-	p := &persistentParse{Job: &job{}, Owner: owner}
-	var enc string
-	err = tx.QueryRowContext(ctx, `SELECT j.id,j.user_id,j.platform,j.flow_id,j.created_at,j.deadline_at,j.expires_at,j.source_url_enc,j.source_hash,j.force_refresh,j.claim_seq FROM parse_job j JOIN app_user u ON u.id=j.user_id WHERE u.status='active' AND j.adapter_version=? AND j.cancel_requested=FALSE AND j.deadline_at>UTC_TIMESTAMP(3) AND (j.status='QUEUED' OR (j.status='RUNNING' AND j.lease_expires_at<=UTC_TIMESTAMP(3))) ORDER BY j.created_at,j.id LIMIT 1 FOR UPDATE SKIP LOCKED`, s.adapterVersion()).Scan(&p.Job.ID, &p.Job.User, &p.Job.Platform, &p.Job.FlowID, &p.Job.Created, &p.Job.Deadline, &p.Job.Expires, &enc, &p.SourceHash, &p.Refresh, &p.Claim)
-	if err != nil {
-		return nil, err
+	var userStatus string
+	if e := tx.QueryRowContext(ctx, "SELECT status FROM app_user WHERE id=?", p.Job.User).Scan(&userStatus); e != nil && !errors.Is(e, sql.ErrNoRows) {
+		return nil, e
+	}
+	if userStatus != "active" {
+		if _, e := tx.ExecContext(ctx, "UPDATE parse_job SET status='CANCELLED',cancel_requested=TRUE,version=version+1 WHERE id=?", p.Job.ID); e != nil {
+			return nil, e
+		}
+		if e := tx.Commit(); e != nil {
+			return nil, e
+		}
+		return nil, sql.ErrNoRows
 	}
 	if err = s.openTask(p.Job.ID, "source", enc, &p.Source); err != nil {
 		_, e := tx.ExecContext(ctx, "UPDATE parse_job SET status='FAILED',error_code='UPSTREAM_INVALID_RESPONSE',version=version+1 WHERE id=?", p.Job.ID)
@@ -209,6 +235,27 @@ func (s *Mock) claimParse(ctx context.Context, owner string) (*persistentParse, 
 }
 
 func (s *Mock) finishParse(ctx context.Context, p *persistentParse, parsed *parse.Result, parseErr error) error {
+	ctx, cancel := context.WithDeadline(ctx, minTime(p.Job.Deadline, time.Now().Add(s.Settings.Seconds("parser_call_timeout_seconds"))))
+	defer cancel()
+	for {
+		err := s.finishParseOnce(ctx, p, parsed, parseErr)
+		var conflict *mysql.MySQLError
+		if !errors.As(err, &conflict) || conflict.Number != 1213 {
+			return err
+		}
+		// Retry only the rolled-back database publication, never the parser.
+		// The job/lease fence is checked again on every attempt.
+		timer := time.NewTimer(time.Duration(s.Settings.Int("poll_interval_ms")) * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (s *Mock) finishParseOnce(ctx context.Context, p *persistentParse, parsed *parse.Result, parseErr error) error {
 	tx, err := s.Sessions.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -317,7 +364,9 @@ func (s *Mock) parseWorker(ctx context.Context, owner string) {
 			parsed, e := s.parseCache.resolve(call, p.SourceHash, p.Refresh, func() (*parse.Result, error) { return s.callParser(call, p.Source) })
 			close(stopped)
 			if ctx.Err() == nil {
-				_ = s.finishParse(ctx, p, parsed, e)
+				if err := s.finishParse(ctx, p, parsed, e); err != nil {
+					slog.Warn("parse publication failed", "error", err)
+				}
 			}
 			cancel()
 			continue
