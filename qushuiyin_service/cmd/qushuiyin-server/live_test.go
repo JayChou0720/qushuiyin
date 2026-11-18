@@ -6,8 +6,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"testing"
+	"time"
+
+	"qushuiyin/service/internal/parse"
 )
 
 // Opt in with -tags live. Do not log URLs, even when a sample fails.
@@ -26,9 +30,43 @@ func TestLiveSamples(t *testing.T) {
 	if json.Unmarshal(b, &samples) != nil || len(samples) == 0 {
 		t.Fatal("invalid sample file")
 	}
-	for i, s := range samples {
+	const batchLimit = 10
+	const platformInterval = 10 * time.Second
+	lastFinished := make(map[string]time.Time)
+	stopped := make(map[string]bool)
+	attempted := 0
+	var adapter parse.Adapter
+	order := make([]int, 0, len(samples))
+	for _, probeOnly := range []bool{false, true} {
+		for i, s := range samples {
+			if s.ProbeOnly == probeOnly {
+				order = append(order, i)
+			}
+		}
+	}
+	for _, i := range order {
+		s := samples[i]
+		if attempted >= batchLimit {
+			t.Log("live batch reached 10 samples")
+			break
+		}
+		u, _ := url.Parse(s.URL)
+		platform := parse.Platform(u)
+		if stopped[platform] {
+			continue
+		}
+		if wait := time.Until(lastFinished[platform].Add(platformInterval)); wait > 0 {
+			timer := time.NewTimer(wait)
+			select {
+			case <-timer.C:
+			case <-t.Context().Done():
+				timer.Stop()
+				return
+			}
+		}
+		attempted++
 		var out bytes.Buffer
-		e := run(t.Context(), []string{"probe", s.URL}, func(k string) string {
+		e := runWithProbeAdapter(t.Context(), []string{"probe", s.URL}, func(k string) string {
 			switch k {
 			case "APP_ENV":
 				return "test"
@@ -38,7 +76,13 @@ func TestLiveSamples(t *testing.T) {
 				return os.Getenv(k)
 			}
 			return ""
-		}, &out)
+		}, &out, &adapter)
+		lastFinished[platform] = time.Now()
+		if errors.Is(e, parse.ErrUpstreamChallenge) {
+			stopped[platform] = true
+			t.Logf("sample %d (%s): verification page, stopped platform for this run; wait at least 30 minutes before retesting", i+1, platform)
+			continue
+		}
 		// Previously observed public samples may expire. Keep them available
 		// for reproduction without asserting that their upstream status is fixed.
 		if s.ProbeOnly {

@@ -33,6 +33,11 @@ type report struct {
 }
 
 func run(ctx context.Context, args []string, getenv func(string) string, out io.Writer) error {
+	return runWithProbeAdapter(ctx, args, getenv, out, nil)
+}
+
+// The live batch keeps one adapter so platform limits span all its samples.
+func runWithProbeAdapter(ctx context.Context, args []string, getenv func(string) string, out io.Writer, shared *parse.Adapter) error {
 	if len(args) > 0 && args[0] == "admin" {
 		return adminCommand(ctx, args[1:], getenv, out)
 	}
@@ -92,11 +97,24 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 			}
 			return nil
 		}
+		values, e := config.Load(ctx, conn)
+		if e != nil {
+			return e
+		}
+		l.Upstream, e = values.Upstream()
+		if e != nil {
+			return e
+		}
+		if e = values.Validate("parse_job_timeout_seconds", "parser_call_timeout_seconds"); e != nil {
+			return e
+		}
+		l.Job = values.Seconds("parse_job_timeout_seconds")
+		l.ParserCall = values.Seconds("parser_call_timeout_seconds")
 		store = db.Domains{DB: conn}
 	}
 	client := outbound.Client{Transport: outbound.Transport(), Redirects: l.Redirects}
 	policy := parse.ValidationPolicy()
-	adapter := parse.Live(l, policy, client)
+	var adapter parse.Adapter
 	if mode == "mock" {
 		var e error
 		adapter, e = parse.Mock(l, policy)
@@ -104,6 +122,16 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 			return errors.New("invalid fixtures")
 		}
 		client.Transport = media.FixtureHeaders{}
+	} else if shared != nil && shared.Resolve != nil {
+		adapter = *shared
+	} else {
+		adapter = parse.Live(l, policy, client)
+		if shared != nil {
+			*shared = adapter
+		}
+	}
+	if mode == "live" {
+		ctx = parse.StopOnVerificationPage(ctx)
 	}
 	r, e := adapter.Parse(ctx, args[1])
 	if e != nil {
@@ -139,7 +167,11 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	if err := run(ctx, os.Args[1:], os.Getenv, os.Stdout); err != nil {
-		json.NewEncoder(os.Stderr).Encode(map[string]string{"error": err.Error()})
+		failure := map[string]any{"error": err.Error()}
+		if errors.Is(err, parse.ErrUpstreamChallenge) {
+			failure["verificationPage"] = true
+		}
+		json.NewEncoder(os.Stderr).Encode(failure)
 		os.Exit(1)
 	}
 }

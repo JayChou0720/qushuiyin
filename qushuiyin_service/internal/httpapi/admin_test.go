@@ -52,7 +52,7 @@ func TestAdminMockMySQL(t *testing.T) {
 	store := auth.AdminStore{DB: db, Key: []byte("only an isolated integration test"), TTL: time.Minute, Lockout: time.Minute, MaxFailures: 2}
 	const host = "localhost:18080"
 	const origin = "http://localhost:18080"
-	handler := (&Mock{Settings: values, Admin: store, AdminHost: host, AdminOrigins: map[string]bool{origin: true}}).Handler()
+	handler := (&Mock{Settings: values, Admin: store, AdminHost: host, AdminOrigins: map[string]bool{origin: true}}).Handler(t.Context())
 	request := func(method, path, requestHost, site, payload, token string, want int) *httptest.ResponseRecorder {
 		t.Helper()
 		r := httptest.NewRequest(method, "http://"+requestHost+path, strings.NewReader(payload))

@@ -54,7 +54,7 @@ func TestMockPrivacyMySQL(t *testing.T) {
 		}
 		return session
 	}
-	handle := (&Mock{Sessions: store, Settings: values}).Handler()
+	handle := (&Mock{Sessions: store, Settings: values}).Handler(t.Context())
 	request := func(method, path, token, payload string, want int) {
 		t.Helper()
 		r := httptest.NewRequest(method, path, strings.NewReader(payload))

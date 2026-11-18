@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
+import { setTimeout as delay } from 'node:timers/promises'
 
 const port = Number(process.argv[2] ?? 18080)
 assert.ok(Number.isInteger(port) && port > 0 && port < 65536, 'Expected a loopback API port')
@@ -31,6 +32,15 @@ const other = (await createSession()).token
 const input = shareText => ({ shareText, selectedUrl: null, source: 'manual', forceRefresh: false, flowId: randomUUID() })
 const create = (data, key = randomUUID(), owner = token) => request('POST','/v1/parse-jobs',{token:owner,data,key,expect:202})
 const jobPath = j => '/v1/parse-jobs/' + j.jobId
+const waitJob = async (job, owner = token) => {
+  const deadline = Date.parse(job.deadlineAt)
+  while (Date.now() < deadline) {
+    const current = await request('GET', jobPath(job), { token: owner })
+    if (!['QUEUED', 'RUNNING'].includes(current.status)) return current
+    await delay(job.pollAfterMs)
+  }
+  throw new Error('Parse job did not finish before its deadline')
+}
 const resultPath = j => '/v1/results/' + j.resultId
 
 await request('POST','/v1/parse-jobs',{expect:401,code:'AUTH_REQUIRED'})
@@ -43,18 +53,18 @@ const first = await create(original,key)
 assert.equal((await create(original,key)).jobId,first.jobId)
 await request('POST','/v1/parse-jobs',{token,data:input(gallery),key,expect:409,code:'IDEMPOTENCY_CONFLICT'})
 await request('GET',jobPath(first),{token:other,expect:404,code:'RESOURCE_NOT_FOUND'})
-const read = await request('GET',jobPath(first),{token})
+const read = await waitJob(first)
 assert.equal(read.status,'SUCCEEDED')
 assert.equal(read.historySource.url,video)
 assert.match(read.historySource.key,/^[0-9a-f]{64}$/)
 const signed = gallery + '?signature=x%2By&token=a%3Db'
 const signedJob = await create({...input(video + ' ' + signed + '#share'),selectedUrl:signed + '#share',source:'history'})
-const signedSource = (await request('GET', jobPath(signedJob), {token})).historySource
+const signedSource = (await waitJob(signedJob)).historySource
 assert.equal(signedSource.url,signed + '#share')
 const sameLink = await create(input(signed))
-assert.equal((await request('GET', jobPath(sameLink), {token})).historySource.key,signedSource.key)
+assert.equal((await waitJob(sameLink)).historySource.key,signedSource.key)
 const otherJob = await create(input(signed),randomUUID(),other)
-assert.notEqual((await request('GET', jobPath(otherJob), {token:other})).historySource.key,signedSource.key)
+assert.notEqual((await waitJob(otherJob, other)).historySource.key,signedSource.key)
 const result = await request('GET',resultPath(read),{token})
 assert.equal(result.mediaType,'video')
 assert.equal(result.assets[0].previewUrl,null)
@@ -106,7 +116,7 @@ assert.equal((await fetch(badTicket)).status,403)
 await request('DELETE',batchPath,{token})
 assert.equal((await fetch(ticket.url)).status,404)
 
-const pictureJob=await request('GET',jobPath(await create({...input(video+' '+gallery),selectedUrl:gallery})),{token})
+const pictureJob=await waitJob(await create({...input(video+' '+gallery),selectedUrl:gallery}))
 const pictures=await request('GET',resultPath(pictureJob),{token})
 assert.equal(pictures.mediaType,'image')
 const picturePreviews=await request('POST',resultPath(pictureJob)+'/preview-tickets',{token,data:{assetIds:pictures.assets.map(a=>a.assetId)}})
@@ -122,15 +132,15 @@ assert.equal(picTickets.tickets.length,2)
 const picture=await fetch(picTickets.tickets[0].url)
 assert.equal(picture.headers.get('content-type'),'image/png')
 assert.equal(Buffer.from(await picture.arrayBuffer()).subarray(1,4).toString(),'PNG')
-const bad=await request('GET',jobPath(await create(input(failed))),{token})
+const bad=await waitJob(await create(input(failed)))
 assert.equal(bad.status,'FAILED')
 assert.equal(bad.error.code,'UPSTREAM_UNAVAILABLE')
 const cancelled=await request('DELETE',jobPath(await create(input(video))),{token})
-assert.equal(cancelled.status,'CANCELLED')
+assert.ok(['CANCELLED', 'SUCCEEDED'].includes(cancelled.status))
 
 async function checkRecovery(token) {
 const recoveryCase = async fixtureId => {
-  const job = await request('GET',jobPath(await create(input('https://www.douyin.com/video/'+fixtureId),randomUUID(),token)),{token})
+  const job = await waitJob(await create(input('https://www.douyin.com/video/'+fixtureId),randomUUID(),token), token)
   const res = await request('GET',resultPath(job),{token})
   const path = await makeBatch(res,[res.assets[0].assetId],token)
   return { path, item:(await request('GET',path,{token})).items[0] }

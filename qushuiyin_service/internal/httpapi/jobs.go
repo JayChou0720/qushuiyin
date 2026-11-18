@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -23,7 +24,7 @@ type job struct {
 	ID, User, Platform, ResultID, Failure, Status string
 	FlowID                                        string
 	Created, Deadline, Expires                    time.Time
-	Pending                                       *result
+	cancel                                        context.CancelFunc
 	History                                       *historySource
 }
 type historySource struct {
@@ -132,11 +133,11 @@ func (s *Mock) createJob(w http.ResponseWriter, r *http.Request, c credential) {
 	}
 	active := 0
 	for _, v := range s.jobs {
-		if v.User == c.User && v.Status == "QUEUED" && now.Before(v.Deadline) {
+		if v.User == c.User && v.active() && now.Before(v.Deadline) {
 			active++
 		}
 	}
-	if int64(active) >= s.Settings.Int("user_active_parse_jobs") || int64(len(s.jobs)) >= s.Settings.Int("memory_parse_cache_max_entries") {
+	if int64(active) >= s.Settings.Int("user_active_parse_jobs") || s.parsePool == nil || int64(len(s.jobs)) >= s.Settings.Int("memory_parse_cache_max_entries") {
 		fail(w, 503, "SERVICE_BUSY")
 		return
 	}
@@ -145,28 +146,69 @@ func (s *Mock) createJob(w http.ResponseWriter, r *http.Request, c credential) {
 		return
 	}
 	j := &job{ID: auth.ID(), User: c.User, Platform: p, FlowID: req.FlowID, Status: "QUEUED", Created: now, Deadline: now.Add(s.Settings.Seconds("parse_job_timeout_seconds")), Expires: now.Add(s.Settings.Seconds("result_ttl_seconds"))}
-	parsed, e := s.Adapter.Parse(r.Context(), selected)
-	if e != nil {
-		j.Failure = parseError(e)
-	} else {
-		res := &result{ID: auth.ID(), User: c.User, Value: parsed, CreatedAt: now, ExpiresAt: j.Expires}
-		for _, x := range parsed.Assets {
-			res.Assets = append(res.Assets, asset{auth.ID(), x.Kind, x.Role, x.Order})
-		}
-		if x := parsed.Cover; x != nil {
-			res.Cover = &asset{auth.ID(), x.Kind, x.Role, x.Order}
-		}
-		j.Pending = res
-		// Preserve the selected share URL verbatim for replay. Normalize only the deduplication key.
-		canonical := *u
-		canonical.Host = strings.ToLower(canonical.Host)
-		canonical.Fragment, canonical.RawFragment = "", ""
-		j.History = &historySource{selected, auth.Digest(s.Sessions.Key, "history:"+c.User+":"+canonical.String())}
-	}
+	// Preserve the selected URL verbatim for replay. Normalize only the history key.
+	canonical := *u
+	canonical.Host = strings.ToLower(canonical.Host)
+	canonical.Fragment, canonical.RawFragment = "", ""
+	j.History = &historySource{selected, auth.Digest(s.Sessions.Key, "history:"+c.User+":"+canonical.String())}
+	jobCtx, cancel := context.WithDeadline(s.parseContext, j.Deadline)
+	j.cancel = cancel
 	s.jobs[j.ID] = j
 	record.ID = j.ID
 	s.keys[key] = record
 	s.jobAccepted(w, j)
+	source := parse.MockSourceKey(p, u, selected)
+	cacheKey := auth.Digest(s.Sessions.Key, "parse-cache:"+p+":"+parse.MockVersion+":anonymous:"+source)
+	go s.runJob(jobCtx, j, selected, cacheKey, req.ForceRefresh)
+}
+
+func (j *job) active() bool { return j.Status == "QUEUED" || j.Status == "RUNNING" }
+
+func (s *Mock) runJob(ctx context.Context, j *job, selected, cacheKey string, forceRefresh bool) {
+	defer j.cancel()
+	select {
+	case s.parsePool <- struct{}{}:
+		defer func() { <-s.parsePool }()
+	case <-ctx.Done():
+	}
+	s.mu.Lock()
+	if s.jobs[j.ID] != j || !j.active() {
+		s.mu.Unlock()
+		return
+	}
+	if ctx.Err() != nil {
+		j.Status, j.Failure = "FAILED", "PARSE_TIMEOUT"
+		s.mu.Unlock()
+		return
+	}
+	j.Status = "RUNNING"
+	s.mu.Unlock()
+
+	parsed, err := s.parseCache.resolve(ctx, cacheKey, forceRefresh, func() (*parse.Result, error) {
+		return s.Adapter.Parse(ctx, selected)
+	})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.jobs[j.ID] != j || !j.active() {
+		return
+	}
+	if ctx.Err() != nil || !time.Now().Before(j.Deadline) {
+		j.Status, j.Failure = "FAILED", "PARSE_TIMEOUT"
+		return
+	}
+	if err != nil {
+		j.Status, j.Failure = "FAILED", parseError(err)
+		return
+	}
+	res := &result{ID: auth.ID(), User: j.User, Value: parsed, CreatedAt: time.Now().UTC(), ExpiresAt: j.Expires}
+	for _, x := range parsed.Assets {
+		res.Assets = append(res.Assets, asset{auth.ID(), x.Kind, x.Role, x.Order})
+	}
+	if x := parsed.Cover; x != nil {
+		res.Cover = &asset{auth.ID(), x.Kind, x.Role, x.Order}
+	}
+	s.results[res.ID] = res
+	j.Status, j.ResultID = "SUCCEEDED", res.ID
 }
 func (s *Mock) jobAccepted(w http.ResponseWriter, j *job) {
 	ok(w, 202, dto{"jobId": j.ID, "status": j.Status, "pollAfterMs": s.Settings.Int("poll_interval_ms"), "deadlineAt": j.Deadline})
@@ -183,23 +225,14 @@ func (s *Mock) jobStatus(w http.ResponseWriter, r *http.Request, c credential) {
 		fail(w, 410, "JOB_EXPIRED")
 		return
 	}
-	if j.Status == "QUEUED" {
+	if j.active() {
 		switch {
 		case r.Method == "DELETE":
 			j.Status = "CANCELLED"
-			j.Failure = ""
-			j.Pending = nil
-		case time.Now().After(j.Deadline):
-			j.Status = "FAILED"
-			j.Failure = "PARSE_TIMEOUT"
-			j.Pending = nil
-		case j.Failure != "":
-			j.Status = "FAILED"
-		default:
-			j.Status = "SUCCEEDED"
-			j.ResultID = j.Pending.ID
-			s.results[j.ResultID] = j.Pending
-			j.Pending = nil
+			j.cancel()
+		case !time.Now().Before(j.Deadline):
+			j.Status, j.Failure = "FAILED", "PARSE_TIMEOUT"
+			j.cancel()
 		}
 	}
 	var e, id any

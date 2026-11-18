@@ -52,7 +52,7 @@ func TestAdminFeedbackMySQL(t *testing.T) {
 	const host = "127.0.0.1:18080"
 	const origin = "http://" + host
 	s := Mock{Admin: admin, AdminHost: host, AdminOrigins: map[string]bool{origin: true}, Sessions: store, Settings: values}
-	handler := s.Handler()
+	handler := s.Handler(t.Context())
 	exec := func(query string, args ...any) {
 		t.Helper()
 		if _, err := db.ExecContext(ctx, query, args...); err != nil {

@@ -55,6 +55,7 @@ func (s *Mock) evictUser(user string) {
 	defer s.mu.Unlock()
 	for id, x := range s.jobs {
 		if x.User == user {
+			x.cancel()
 			delete(s.jobs, id)
 		}
 	}

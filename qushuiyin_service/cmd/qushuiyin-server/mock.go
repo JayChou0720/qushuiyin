@@ -77,7 +77,7 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 	if e != nil {
 		return errors.New("configuration unavailable; run migrate up first")
 	}
-	if e = settings.Validate("session_ttl_seconds", "max_request_body_bytes", "max_share_text_chars", "max_candidate_urls", "max_image_batch_count", "parse_job_timeout_seconds", "poll_interval_ms", "result_ttl_seconds", "batch_ttl_seconds", "batch_prepare_timeout_seconds", "client_download_timeout_seconds", "ticket_safety_margin_seconds", "media_ticket_ttl_seconds", "idempotency_ttl_seconds", "media_gc_interval_seconds", "user_active_parse_jobs", "user_active_save_batches", "memory_parse_cache_max_entries", "memory_rate_limit_max_subjects", "ip_parse_requests_per_minute", "user_parse_per_minute", "user_download_url_requests_per_minute"); e != nil {
+	if e = settings.Validate("session_ttl_seconds", "max_request_body_bytes", "max_share_text_chars", "max_candidate_urls", "max_image_batch_count", "parse_job_timeout_seconds", "poll_interval_ms", "result_ttl_seconds", "batch_ttl_seconds", "batch_prepare_timeout_seconds", "client_download_timeout_seconds", "ticket_safety_margin_seconds", "media_ticket_ttl_seconds", "idempotency_ttl_seconds", "media_gc_interval_seconds", "user_active_parse_jobs", "parser_workers", "parse_cache_ttl_seconds", "user_active_save_batches", "memory_parse_cache_max_entries", "memory_rate_limit_max_subjects", "ip_parse_requests_per_minute", "user_parse_per_minute", "user_download_url_requests_per_minute"); e != nil {
 		return e
 	}
 	platforms, policy, e := mockPlatforms(ctx, db)
@@ -121,7 +121,7 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 		mock.AdminOrigins[v] = true
 	}
 	// All requests are bounded by the job budget; only small sample files are served.
-	srv := http.Server{Addr: addr, Handler: mock.Handler(), ReadTimeout: l.Job, WriteTimeout: l.Job, IdleTimeout: settings.Seconds("config_client_cache_seconds")}
+	srv := http.Server{Addr: addr, Handler: mock.Handler(ctx), ReadTimeout: l.Job, WriteTimeout: l.Job, IdleTimeout: settings.Seconds("config_client_cache_seconds")}
 	listener, e := net.Listen("tcp", addr)
 	if e != nil {
 		return errors.New("local HTTP port is unavailable")

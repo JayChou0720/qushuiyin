@@ -111,7 +111,7 @@ func (c Client) Headers(ctx context.Context, raw, method, byteRange string, allo
 		}
 		resp, e := c.Transport.RoundTrip(req)
 		if e != nil {
-			return nil, denied
+			return nil, e
 		}
 		resp.Request = req
 		switch resp.StatusCode {

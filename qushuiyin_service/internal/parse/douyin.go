@@ -7,6 +7,7 @@ import (
 	"crypto/cipher"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -128,6 +129,12 @@ func shareGet(ctx context.Context, c outbound.Client, jar http.CookieJar, raw, r
 		}
 		resp, err := c.Transport.RoundTrip(req)
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return nil, Timeout
+			}
+			if protected := upstreamProtectionError(err); protected != nil {
+				return nil, protected
+			}
 			return nil, Unavailable
 		}
 		resp.Request = req
@@ -151,8 +158,14 @@ func shareGet(ctx context.Context, c outbound.Client, jar http.CookieJar, raw, r
 		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, h5MaxBytes+1))
 		resp.Body.Close()
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, Timeout
+		}
 		if err != nil || len(body) > h5MaxBytes {
 			return nil, Unavailable
+		}
+		if bytes.Contains(body, []byte("_wafchallengeid")) && bytes.Contains(body, []byte("WAFJS")) {
+			return nil, ErrUpstreamChallenge
 		}
 		return body, nil
 	}
@@ -162,6 +175,14 @@ func shareGet(ctx context.Context, c outbound.Client, jar http.CookieJar, raw, r
 type h5Item struct {
 	info            *parser.VideoParseInfo
 	imageAlternates [][]string
+}
+
+type validationProbeKey struct{}
+
+// StopOnVerificationPage makes a live smoke test end at the first incomplete
+// share page. Regular parsing still makes one retry for missing fields.
+func StopOnVerificationPage(ctx context.Context) context.Context {
+	return context.WithValue(ctx, validationProbeKey{}, true)
 }
 
 func douyinItem(ctx context.Context, c outbound.Client, work string) (*h5Item, error) {
@@ -177,6 +198,9 @@ func douyinItem(ctx context.Context, c outbound.Client, work string) (*h5Item, e
 		}
 		q, err := readSharePage(body).params(work)
 		if err != nil {
+			if ctx.Value(validationProbeKey{}) == true {
+				return nil, ErrUpstreamChallenge
+			}
 			continue
 		}
 		body, err = shareGet(ctx, c, jar, shareOrigin+itemPath+"?"+q.Encode(), page)
@@ -185,7 +209,7 @@ func douyinItem(ctx context.Context, c outbound.Client, work string) (*h5Item, e
 		}
 		return parseItem(body, work)
 	}
-	return nil, Unavailable
+	return nil, ErrUpstreamChallenge
 }
 
 type h5URLs struct {

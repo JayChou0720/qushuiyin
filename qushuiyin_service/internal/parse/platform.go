@@ -18,6 +18,8 @@ const (
 	TypeUnsupported Code = "CONTENT_TYPE_UNSUPPORTED"
 	InvalidResponse Code = "UPSTREAM_INVALID_RESPONSE"
 	Unavailable     Code = "UPSTREAM_UNAVAILABLE"
+	Maintenance     Code = "PLATFORM_MAINTENANCE"
+	Busy            Code = "SERVICE_BUSY"
 	Timeout         Code = "PARSE_TIMEOUT"
 	Canceled        Code = "CANCELLED"
 )

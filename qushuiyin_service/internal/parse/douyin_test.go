@@ -133,7 +133,7 @@ func TestDouyinH5RejectsInvalidUpstream(t *testing.T) {
 	}{
 		{"short without ID", "", "", "", true, 1, Unavailable},
 		{"short redirects off platform", "", "", "https://douyin.com.example.test/video/123", true, 1, Unavailable},
-		{"missing attributes", `<body>`, "", "", false, 2, Unavailable},
+		{"missing attributes", `<body>`, "", "", false, 2, ErrUpstreamChallenge},
 		{"item redirects off origin", shareFixture, "", "https://www.douyin.com/video/123", false, 2, Unavailable},
 		{"item redirects to other path", shareFixture, "", shareOrigin + "/other", false, 2, Unavailable},
 		{"item redirects to HTTP", shareFixture, "", "http://www.iesdouyin.com" + itemPath, false, 2, Unavailable},

@@ -47,14 +47,18 @@ type Adapter struct {
 	Limits      config.Limits
 	Policy      map[string]Capability
 	Resolve     func(context.Context, string) (*parser.VideoParseInfo, error)
-	Canonical   func(context.Context, string, string) *url.URL
+	Canonical   func(context.Context, string, string) (*url.URL, error)
+	guard       *upstreamGuard
 	douyin      func(context.Context, string) (*h5Item, error)
 	coverClient outbound.Client
 }
 
 func Live(l config.Limits, policy map[string]Capability, c outbound.Client) Adapter {
+	protected := c
+	protected.Transport = upstreamTransport{base: c.Transport, timeout: l.ParserCall}
 	return Adapter{
 		Limits: l,
+		guard:  newUpstreamGuard(l.Upstream),
 		Policy: policy,
 		Resolve: func(ctx context.Context, raw string) (*parser.VideoParseInfo, error) {
 			if os.Getenv("PARSE_VIDEO_DOUYIN_COOKIE") != "" {
@@ -62,29 +66,29 @@ func Live(l config.Limits, policy map[string]Capability, c outbound.Client) Adap
 			}
 			return parser.ParseVideoShareUrlContext(ctx, raw)
 		},
-		Canonical: func(ctx context.Context, p, raw string) *url.URL {
-			resp, err := c.Headers(ctx, raw, http.MethodHead, "", func(u *url.URL) bool {
+		Canonical: func(ctx context.Context, p, raw string) (*url.URL, error) {
+			resp, err := protected.Headers(ctx, raw, http.MethodHead, "", func(u *url.URL) bool {
 				if p == "douyin" {
 					return h5Host(u)
 				}
 				return Platform(u) == p
 			})
 			if err != nil {
-				return nil
+				return nil, upstreamProtectionError(err)
 			}
 			defer resp.Body.Close()
 			if p == "douyin" && contentID(p, resp.Request.URL) != nil {
 				// Short-link expansion only needs the work ID. The terminal
 				// public page can reject HEAD while H5 iteminfo still works.
-				return resp.Request.URL
+				return resp.Request.URL, nil
 			}
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				return nil
+				return nil, nil
 			}
-			return resp.Request.URL
+			return resp.Request.URL, nil
 		},
 		douyin: func(ctx context.Context, id string) (*h5Item, error) {
-			return douyinItem(ctx, c, id)
+			return douyinItem(ctx, protected, id)
 		},
 		coverClient: c,
 	}
@@ -113,7 +117,7 @@ func httpsMediaSource(raw string) string {
 	return raw
 }
 
-func (a Adapter) Parse(ctx context.Context, raw string) (*Result, error) {
+func (a Adapter) Parse(ctx context.Context, raw string) (_ *Result, retErr error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return nil, Invalid
@@ -124,7 +128,7 @@ func (a Adapter) Parse(ctx context.Context, raw string) (*Result, error) {
 	p := Platform(u)
 	cap := a.Policy[p]
 	if cap.Status == "maintenance" {
-		return nil, Code("PLATFORM_MAINTENANCE")
+		return nil, Maintenance
 	}
 	if p == "" || cap.Status != "enabled" {
 		return nil, Unsupported
@@ -134,19 +138,39 @@ func (a Adapter) Parse(ctx context.Context, raw string) (*Result, error) {
 	}
 	ctx, stop := context.WithTimeout(ctx, a.Limits.Job)
 	defer stop()
+	var permit *upstreamPermit
+	if a.guard != nil {
+		permit, err = a.guard.begin(p)
+		if err != nil {
+			return nil, err
+		}
+		ctx = context.WithValue(ctx, upstreamPermitKey{}, permit)
+		defer func() { permit.finish(retErr == nil, errors.Is(retErr, ErrUpstreamChallenge)) }()
+	}
 	canonical := u
 	if contentID(p, u) == nil {
-		short, done := context.WithTimeout(ctx, a.Limits.ParserCall)
-		canonical = a.Canonical(short, p, raw)
-		done()
+		canonical, err = a.Canonical(ctx, p, raw)
+		if err != nil {
+			return nil, err
+		}
 	}
 	// Bilibili's library always parses the first part. Reject links whose
 	// requested part could not be confirmed before calling the library.
 	if p == "bilibili" && (contentID(p, canonical) == nil || !biliAllowed(canonical)) {
 		return nil, TypeUnsupported
 	}
-	call, done := context.WithTimeout(ctx, a.Limits.ParserCall)
-	defer done()
+	if permit != nil && p != "douyin" {
+		// The pinned library owns its transport, so reserve once per library call.
+		if err := permit.wait(ctx); err != nil {
+			return nil, err
+		}
+	}
+	call := ctx
+	if p != "douyin" || a.douyin == nil {
+		var done context.CancelFunc
+		call, done = context.WithTimeout(ctx, a.Limits.ParserCall)
+		defer done()
+	}
 	var info *parser.VideoParseInfo
 	var imageAlternates [][]string
 	if p == "douyin" && a.douyin != nil {
@@ -163,10 +187,16 @@ func (a Adapter) Parse(ctx context.Context, raw string) (*Result, error) {
 	} else {
 		info, err = a.Resolve(call, raw)
 	}
+	if protected := upstreamProtectionError(err); protected != nil {
+		return nil, protected
+	}
 	if errors.Is(call.Err(), context.Canceled) {
 		return nil, Canceled
 	}
 	if errors.Is(call.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return nil, Timeout
+	}
+	if errors.Is(err, Timeout) {
 		return nil, Timeout
 	}
 	if errors.Is(err, InvalidResponse) {

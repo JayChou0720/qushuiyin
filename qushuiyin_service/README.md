@@ -65,6 +65,6 @@ Mock 只回放合成解析结果与媒体响应头，不访问网络、不写数
 
 不配置 `MYSQL_DSN` 也可采集主机，但状态为 `untracked`。要写入本地开发库，请先设 `MYSQL_DSN`（只在本机设置），对 `qushuiyin_dev` 运行 `qushuiyin-server migrate up`；用 `migrate status` 查看迁移状态。探测只会将新主机记为 `observed`，重复观测不会覆盖现有登记状态。直连判定是服务端探测结果，不是相册保存或真机域名校验的结论。
 
-真实样本文件参照 `testdata/live_samples.example.json`，置于 `testdata/live_samples.local.json`（已被 Git 忽略）。正例填 `platform` 和 `mediaType`；反例填预期 `error`。运行 `go test -tags live -run TestLiveSamples -v ./cmd/qushuiyin-server`。MySQL 集成测试使用单独的 `MYSQL_TEST_DSN`，只在 `qushuiyin_test` 库运行。未配置样本或测试连接时相应测试会跳过。
+真实样本文件参照 `testdata/live_samples.example.json`，置于 `testdata/live_samples.local.json`（已被 Git 忽略）。正例填 `platform` 和 `mediaType`；反例填预期 `error`。运行 `go test -tags live -run TestLiveSamples -v ./cmd/qushuiyin-server`。MySQL 集成测试使用单独的 `MYSQL_TEST_DSN`，只在 `qushuiyin_test` 库运行。未配置样本或测试连接时相应测试会跳过。真实样本回归同一平台的样本间隔至少 10 秒，单轮最多 10 条。遇到验证页会停止该平台的样本测试。手动运行 `probe` 同样遵守这些间隔，遇到验证页至少等待 30 分钟再测。
 
 用 [M0 能力验证表](doc/m0-validation.md) 汇总实测结果。

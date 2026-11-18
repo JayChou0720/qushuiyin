@@ -47,12 +47,12 @@ func TestShortLinksAndGates(t *testing.T) {
 		return &parser.VideoParseInfo{VideoUrl: "https://cdn.example.test/v"}, nil
 	}
 	for _, dest := range []string{"", "https://www.xiaohongshu.com/explore/123abc"} {
-		a.Canonical = func(context.Context, string, string) *url.URL {
+		a.Canonical = func(context.Context, string, string) (*url.URL, error) {
 			if dest == "" {
-				return nil
+				return nil, nil
 			}
 			u, _ := url.Parse(dest)
-			return u
+			return u, nil
 		}
 		r, e := a.Parse(t.Context(), raw)
 		if e != nil || r.Title != nil || r.Cover != nil || (dest == "") != (r.ContentID == nil) {
@@ -139,12 +139,12 @@ func TestBilibiliShortLinkPart(t *testing.T) {
 		{"https://www.bilibili.com/video/BV123?p=2", 0, TypeUnsupported},
 		{"https://www.bilibili.com/video/BV123?p=1", 1, nil},
 	} {
-		a.Canonical = func(context.Context, string, string) *url.URL {
+		a.Canonical = func(context.Context, string, string) (*url.URL, error) {
 			if tc.target == "" {
-				return nil
+				return nil, nil
 			}
 			u, _ := url.Parse(tc.target)
-			return u
+			return u, nil
 		}
 		_, e := a.Parse(t.Context(), "https://b23.tv/short")
 		if e != tc.want || calls != tc.calls {
