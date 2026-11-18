@@ -89,16 +89,19 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 	if e = settings.Validate("session_ttl_seconds", "max_request_body_bytes", "max_share_text_chars", "max_candidate_urls", "max_image_batch_count", "parse_job_timeout_seconds", "poll_interval_ms", "result_ttl_seconds", "batch_ttl_seconds", "batch_prepare_timeout_seconds", "client_download_timeout_seconds", "ticket_safety_margin_seconds", "media_ticket_ttl_seconds", "idempotency_ttl_seconds", "media_gc_interval_seconds", "user_active_parse_jobs", "parser_workers", "parse_cache_ttl_seconds", "user_active_save_batches", "memory_parse_cache_max_entries", "memory_rate_limit_max_subjects", "ip_parse_requests_per_minute", "user_parse_per_minute", "user_download_url_requests_per_minute"); e != nil {
 		return e
 	}
+	if e = settings.Validate(
+		"max_redirects", "max_result_assets", "max_title_chars", "max_description_chars", "parser_call_timeout_seconds",
+		"direct_probe_range_bytes", "ip_login_requests_per_minute", "ip_admin_login_requests_per_minute",
+		"admin_password_workers", "memory_media_ticket_max_entries", "cleanup_batch_size", "database_operation_timeout_seconds",
+		"http_read_timeout_seconds", "http_write_timeout_seconds", "http_idle_timeout_seconds",
+	); e != nil {
+		return e
+	}
 	platforms, policy, e := mockPlatforms(ctx, db)
 	if e != nil {
 		return errors.New("platform configuration unavailable")
 	}
-	l := config.Defaults()
-	l.Assets = int(settings.Int("max_result_assets"))
-	l.Title = int(settings.Int("max_title_chars"))
-	l.Description = int(settings.Int("max_description_chars"))
-	l.Job = settings.Seconds("parse_job_timeout_seconds")
-	l.ParserCall = settings.Seconds("parser_call_timeout_seconds")
+	l := settings.Limits()
 	parser, e := parse.Mock(l, policy)
 	if mode == "live" {
 		l.Upstream, e = settings.Upstream()
@@ -153,12 +156,17 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 		if st, err := os.Stat(probe); err != nil || !st.Mode().IsRegular() {
 			return errors.New("ffprobe executable unavailable")
 		}
-		if e = settings.Validate("image_convert_workers", "thumbnail_max_edge_px", "thumbnail_jpeg_quality", "thumbnail_generate_timeout_seconds", "ticket_byte_budget_multiplier", "media_workers", "media_fetch_timeout_seconds", "relay_max_video_bytes", "max_image_bytes", "max_image_pixels", "max_media_candidates", "media_cache_budget_bytes", "shared_media_max_age_seconds", "global_media_connections", "user_media_connections", "ticket_connections", "global_media_egress_per_day_bytes", "user_media_egress_per_day_bytes", "lease_cleanup_grace_seconds"); e != nil {
+		if e = settings.Validate("image_convert_workers", "thumbnail_max_edge_px", "thumbnail_jpeg_quality", "thumbnail_generate_timeout_seconds", "ticket_byte_budget_multiplier", "media_workers", "media_fetch_timeout_seconds", "relay_max_video_bytes", "max_image_bytes", "max_image_pixels", "max_media_candidates", "media_cache_budget_bytes", "shared_media_max_age_seconds", "ffprobe_max_output_bytes", "global_media_connections", "user_media_connections", "ticket_connections", "global_media_egress_per_day_bytes", "user_media_egress_per_day_bytes", "lease_cleanup_grace_seconds"); e != nil {
 			return e
 		}
 		mock.Relay = &media.Relay{Domains: store.Domains{DB: db}, DB: db, Client: outbound.Client{Transport: outbound.Transport(), Redirects: l.Redirects}, Settings: settings, Key: key, Directory: dir, FFprobe: probe}
 	}
-	srv := http.Server{Addr: addr, Handler: mock.Handler(ctx), ReadTimeout: l.Job, WriteTimeout: l.Job, IdleTimeout: settings.Seconds("config_client_cache_seconds")}
+	srv := http.Server{
+		Addr: addr, Handler: mock.Handler(ctx),
+		ReadTimeout:  settings.Seconds("http_read_timeout_seconds"),
+		WriteTimeout: settings.Seconds("http_write_timeout_seconds"),
+		IdleTimeout:  settings.Seconds("http_idle_timeout_seconds"),
+	}
 	listener, e := net.Listen("tcp", addr)
 	if e != nil {
 		return errors.New("local HTTP port is unavailable")

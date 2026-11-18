@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"qushuiyin/service/internal/config"
 	"qushuiyin/service/internal/parse"
 )
 
@@ -21,15 +20,7 @@ func (r *Relay) Decide(ctx context.Context, platform, policy string, a parse.Ass
 	if policy == "relay_only" && r.Domains == nil {
 		return Decision{Mode: "relay"}
 	}
-	l := config.Defaults()
-	l.Media = r.Settings.Seconds("media_fetch_timeout_seconds")
-	l.RangeBytes = r.Settings.Int("direct_probe_range_bytes")
-	l.VideoBytes = r.Settings.Int("max_video_bytes")
-	l.ImageBytes = r.Settings.Int("max_image_bytes")
-	l.AssumedTTL = r.Settings.Seconds("direct_url_assumed_ttl_seconds")
-	l.Download = r.Settings.Seconds("client_download_timeout_seconds")
-	l.Margin = r.Settings.Seconds("ticket_safety_margin_seconds")
-	l.MediaCandidates = int(r.Settings.Int("max_media_candidates"))
+	l := r.Settings.Limits()
 	o := (Probe{Client: r.Client, Limits: l, Domains: r.Domains, Policy: policy}).Inspect(ctx, platform, a)
 	d := Decision{URL: o.FinalURL, Host: o.Host, MIME: o.Type, Size: o.Size, Expires: time.Now().UTC().Add(l.AssumedTTL), Unregistered: o.Host != "" && o.Domain != "registered"}
 	validType := o.Type == "image/jpeg" || o.Type == "image/png" || o.Type == "image/webp"

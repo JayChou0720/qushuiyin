@@ -86,7 +86,7 @@ func (s *Mock) createBatch(w http.ResponseWriter, r *http.Request, c credential)
 		fail(w, 410, "RESULT_EXPIRED")
 		return
 	}
-	if int64(len(state.batches)) >= s.Settings.Int("memory_parse_cache_max_entries") {
+	if !s.Persistent && int64(len(state.batches)) >= s.Settings.Int("memory_mock_max_entries") {
 		fail(w, 503, "SERVICE_BUSY")
 		return
 	}

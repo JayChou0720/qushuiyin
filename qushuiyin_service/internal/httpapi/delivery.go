@@ -101,12 +101,11 @@ func (s *Mock) callParser(ctx context.Context, source string) (*parse.Result, er
 // Reserve the batch-wide budget before the network call. A crash spends that
 // reservation; it never resets the budget or duplicates an unbounded refresh.
 func (s *Mock) refreshSources(ctx context.Context, b *batch, res *persistentResult, direct bool) error {
-	select {
-	case s.refreshSlots <- struct{}{}:
-		defer func() { <-s.refreshSlots }()
-	case <-ctx.Done():
-		return ctx.Err()
+	unlock, e := s.refreshGates.lockContext(ctx, b.ID)
+	if e != nil {
+		return e
 	}
+	defer unlock()
 	tx, e := s.Sessions.DB.BeginTx(ctx, nil)
 	if e != nil {
 		return e

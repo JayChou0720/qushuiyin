@@ -87,7 +87,7 @@ func (r *Relay) CleanOnce(ctx context.Context) {
 	if err := r.loadUsage(ctx); err != nil {
 		return
 	}
-	limit := int(r.Settings.Int("pagination_max"))
+	limit := int(r.Settings.Int("cleanup_batch_size"))
 	if limit <= 0 {
 		return
 	}

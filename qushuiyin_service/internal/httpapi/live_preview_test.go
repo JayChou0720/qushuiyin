@@ -52,7 +52,6 @@ func TestPersistentParseFailureMySQL(t *testing.T) {
 func TestPersistentParseWorkersPublishFailuresMySQL(t *testing.T) {
 	h := newDeliveryHarness(t)
 	h.s.Settings.Data["poll_interval_ms"] = json.RawMessage(`10`)
-	h.s.Settings.Data["ip_parse_requests_per_minute"] = json.RawMessage(`100`)
 	h.s.Settings.Data["user_parse_per_minute"] = json.RawMessage(`100`)
 	ctx, cancel := context.WithCancel(t.Context())
 	var wg sync.WaitGroup

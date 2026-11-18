@@ -38,7 +38,7 @@ func (s *Mock) adminLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	allowed := s.minute("admin-login:"+host, s.Settings.Int("ip_parse_requests_per_minute"))
+	allowed := s.minute("admin-login:"+host, s.Settings.Int("ip_admin_login_requests_per_minute"))
 	s.mu.Unlock()
 	if !allowed {
 		fail(w, 429, "RATE_LIMITED")
@@ -104,7 +104,7 @@ func (s *Mock) adminRole(next func(http.ResponseWriter, *http.Request, auth.Admi
 }
 
 func (s *Mock) adminRoutes(m *http.ServeMux) {
-	s.adminHashSlots = make(chan struct{}, 4)
+	s.adminHashSlots = make(chan struct{}, s.Settings.Int("admin_password_workers"))
 	m.HandleFunc("POST /admin/v1/sessions", s.adminGuard(s.adminLogin))
 	m.HandleFunc("GET /admin/v1/me", s.withAdmin(func(w http.ResponseWriter, _ *http.Request, a auth.Admin, _ string) { ok(w, 200, a) }))
 	m.HandleFunc("GET /admin/v1/feedbacks", s.adminRole(s.adminFeedbackList, "super_admin", "operator", "support"))

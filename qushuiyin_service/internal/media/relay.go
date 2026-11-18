@@ -396,7 +396,7 @@ func (r *Relay) validateVideo(ctx context.Context, path string) error {
 	// Local files only. Explicit protocol restrictions keep malformed containers
 	// from making ffprobe fetch remote playlists or secondary resources.
 	cmd := exec.CommandContext(ctx, r.FFprobe, "-v", "error", "-protocol_whitelist", "file,pipe", "-show_entries", "format=format_name:stream=codec_type,codec_name", "-of", "json", path)
-	output := &limitedProbeOutput{limit: int(r.Settings.Int("direct_probe_range_bytes"))}
+	output := &limitedProbeOutput{limit: int(r.Settings.Int("ffprobe_max_output_bytes"))}
 	cmd.Stdout = output
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {

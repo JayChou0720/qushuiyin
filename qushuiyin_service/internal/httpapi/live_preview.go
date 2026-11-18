@@ -94,7 +94,7 @@ func (s *Mock) livePreviewTickets(w http.ResponseWriter, r *http.Request, c cred
 				delete(s.previews, key)
 			}
 		}
-		full := int64(len(s.previews)) >= s.Settings.Int("memory_parse_cache_max_entries")
+		full := int64(len(s.previews)) >= s.Settings.Int("memory_media_ticket_max_entries")
 		if !full {
 			s.previews[id] = p
 		}

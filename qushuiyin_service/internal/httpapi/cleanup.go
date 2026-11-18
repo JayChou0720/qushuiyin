@@ -128,10 +128,10 @@ func (s *Mock) cleanDatabase(ctx context.Context, now time.Time) {
 	if s.Sessions.DB == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, s.Settings.Seconds("parse_job_timeout_seconds"))
+	ctx, cancel := context.WithTimeout(ctx, s.Settings.Seconds("database_operation_timeout_seconds"))
 	defer cancel()
 	db := s.Sessions.DB
-	limit := s.Settings.Int("pagination_max")
+	limit := s.Settings.Int("cleanup_batch_size")
 	if s.Persistent {
 		// Keep opaque IDs for explicit expiry/idempotency responses, but erase
 		// source signatures and content as soon as their short retention ends.

@@ -101,6 +101,7 @@ func runWithProbeAdapter(ctx context.Context, args []string, getenv func(string)
 		if e != nil {
 			return e
 		}
+		l = values.Limits()
 		l.Upstream, e = values.Upstream()
 		if e != nil {
 			return e
@@ -108,8 +109,6 @@ func runWithProbeAdapter(ctx context.Context, args []string, getenv func(string)
 		if e = values.Validate("parse_job_timeout_seconds", "parser_call_timeout_seconds"); e != nil {
 			return e
 		}
-		l.Job = values.Seconds("parse_job_timeout_seconds")
-		l.ParserCall = values.Seconds("parser_call_timeout_seconds")
 		store = db.Domains{DB: conn}
 	}
 	client := outbound.Client{Transport: outbound.Transport(), Redirects: l.Redirects}

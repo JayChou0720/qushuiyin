@@ -44,7 +44,7 @@ func (s *Mock) reserveMediaBytes(ctx context.Context, user, key string, expires 
 	}
 	b := s.byteBudgets[key]
 	if b == nil {
-		if int64(len(s.byteBudgets)) >= s.Settings.Int("memory_parse_cache_max_entries") {
+		if int64(len(s.byteBudgets)) >= s.Settings.Int("memory_media_ticket_max_entries") {
 			s.mu.Unlock()
 			return 0, nil, errors.New("SERVICE_BUSY")
 		}
@@ -142,7 +142,7 @@ func (s *Mock) reserveEgress(ctx context.Context, user string, size int64, parti
 		return 0, nil, err
 	}
 	return size, func(actual int64) {
-		settle, cancel := context.WithTimeout(context.Background(), s.Settings.Seconds("parse_job_timeout_seconds"))
+		settle, cancel := context.WithTimeout(context.Background(), s.Settings.Seconds("database_operation_timeout_seconds"))
 		defer cancel()
 		// Failure leaves a conservative full reservation; it cannot overspend quota.
 		_, _ = s.Sessions.DB.ExecContext(settle, "UPDATE usage_counter SET value=GREATEST(0,value-?) WHERE subject_key IN (?,?) AND stat_date=? AND kind='media_egress'", size-actual, "global", user, day)

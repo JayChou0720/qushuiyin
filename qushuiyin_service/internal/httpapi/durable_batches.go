@@ -40,32 +40,45 @@ type keyedMutex struct {
 }
 
 type keyedMutexEntry struct {
-	mu    sync.Mutex
+	token chan struct{}
 	users int
 }
 
 func (m *keyedMutex) lock(key string) func() {
+	unlock, _ := m.lockContext(context.Background(), key)
+	return unlock
+}
+
+func (m *keyedMutex) lockContext(ctx context.Context, key string) (func(), error) {
 	m.mu.Lock()
 	if m.entries == nil {
 		m.entries = make(map[string]*keyedMutexEntry)
 	}
 	entry := m.entries[key]
 	if entry == nil {
-		entry = &keyedMutexEntry{}
+		entry = &keyedMutexEntry{token: make(chan struct{}, 1)}
 		m.entries[key] = entry
 	}
 	entry.users++
 	m.mu.Unlock()
 
-	entry.mu.Lock()
-	return func() {
-		entry.mu.Unlock()
+	drop := func() {
 		m.mu.Lock()
 		entry.users--
 		if entry.users == 0 {
 			delete(m.entries, key)
 		}
 		m.mu.Unlock()
+	}
+	select {
+	case entry.token <- struct{}{}:
+		return func() {
+			<-entry.token
+			drop()
+		}, nil
+	case <-ctx.Done():
+		drop()
+		return nil, ctx.Err()
 	}
 }
 
@@ -105,7 +118,7 @@ func (s *Mock) batchCopyRate(user string) bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 	}
-	return s.rate("copy:"+user, s.Settings.Int("user_copy_link_per_day"), 24*time.Hour)
+	return s.rateUntil("copy:"+user, s.Settings.Int("user_copy_link_per_day"), dayStart(time.Now()).AddDate(0, 0, 1))
 }
 
 func (s *Mock) authorizedBatch(next authed) http.HandlerFunc {
@@ -289,7 +302,7 @@ func (s *Mock) batchCapacity(ctx context.Context, user, action string, now time.
 }
 
 func (s *Mock) persistentEventOwner(e clientEvent, user string, now time.Time) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), s.Settings.Seconds("parse_job_timeout_seconds"))
+	ctx, cancel := context.WithTimeout(context.Background(), s.Settings.Seconds("database_operation_timeout_seconds"))
 	defer cancel()
 	var resultID sql.NullString
 	if e.JobID != nil {

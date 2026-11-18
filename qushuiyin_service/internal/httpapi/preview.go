@@ -75,7 +75,7 @@ func (s *Mock) previewTickets(w http.ResponseWriter, r *http.Request, c credenti
 		fail(w, 429, "RATE_LIMITED")
 		return
 	}
-	if int64(len(s.previews)+len(chosen)) > s.Settings.Int("memory_parse_cache_max_entries") {
+	if int64(len(s.previews)+len(chosen)) > s.Settings.Int("memory_media_ticket_max_entries") {
 		fail(w, 503, "SERVICE_BUSY")
 		return
 	}

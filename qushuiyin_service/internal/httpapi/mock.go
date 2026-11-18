@@ -29,7 +29,7 @@ type Platform struct {
 	Text   bool   `json:"textEnabled"`
 }
 type Mock struct {
-	refreshSlots     chan struct{}
+	refreshGates     keyedMutex
 	hostWindows      map[string]hostWindow
 	Persistent       bool
 	AdapterTag       string
@@ -182,9 +182,9 @@ func (s *Mock) authorized(next authed) http.HandlerFunc {
 	}
 }
 func (s *Mock) minute(key string, cap int64) bool {
-	return s.rate(key, cap, time.Minute)
+	return s.rateUntil(key, cap, time.Now().Add(time.Minute))
 }
-func (s *Mock) rate(key string, cap int64, period time.Duration) bool {
+func (s *Mock) rateUntil(key string, cap int64, expires time.Time) bool {
 	now := time.Now()
 	m := s.rates[key]
 	if !now.Before(m.Until) {
@@ -198,7 +198,7 @@ func (s *Mock) rate(key string, cap int64, period time.Duration) bool {
 				return false
 			}
 		}
-		m = meter{Until: now.Add(period)}
+		m = meter{Until: expires}
 	}
 	if m.Count >= cap {
 		return false
@@ -224,7 +224,7 @@ func (s *Mock) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	allowed := s.minute("login:"+host, s.Settings.Int("ip_parse_requests_per_minute"))
+	allowed := s.minute("login:"+host, s.Settings.Int("ip_login_requests_per_minute"))
 	s.mu.Unlock()
 	if !allowed {
 		fail(w, 429, "RATE_LIMITED")
@@ -238,7 +238,7 @@ func (s *Mock) login(w http.ResponseWriter, r *http.Request) {
 	ok(w, 200, sess)
 }
 func (s *Mock) publicConfig(w http.ResponseWriter, r *http.Request) {
-	keys := []string{"max_share_text_chars", "max_candidate_urls", "max_image_batch_count", "client_parse_wait_seconds", "poll_interval_ms", "client_download_timeout_seconds", "max_video_bytes", "max_image_bytes", "feedback_min_chars", "feedback_max_chars", "feedback_contact_max_chars", "pagination_default", "pagination_max", "event_batch_max", "client_queue_max", "client_event_retention_hours", "client_event_retry_initial_seconds", "client_event_retry_max_seconds", "history_max_count", "history_ttl_days", "thumbnail_local_budget_bytes"}
+	keys := []string{"max_share_text_chars", "max_candidate_urls", "max_image_batch_count", "max_title_chars", "max_description_chars", "config_client_cache_seconds", "client_album_concurrency", "client_parse_wait_seconds", "poll_interval_ms", "client_download_timeout_seconds", "max_video_bytes", "max_image_bytes", "feedback_min_chars", "feedback_max_chars", "feedback_contact_max_chars", "pagination_default", "pagination_max", "event_batch_max", "client_queue_max", "client_event_retention_hours", "client_event_retry_initial_seconds", "client_event_retry_max_seconds", "history_max_count", "history_ttl_days", "thumbnail_local_budget_bytes"}
 	limits := map[string]json.RawMessage{}
 	for _, k := range keys {
 		limits[k] = s.Settings.Data[k]
@@ -256,7 +256,6 @@ func (s *Mock) publicConfig(w http.ResponseWriter, r *http.Request) {
 	ok(w, 200, configData)
 }
 func (s *Mock) Handler(ctx context.Context) http.Handler {
-	s.refreshSlots = make(chan struct{}, 1)
 	s.hostWindows = map[string]hostWindow{}
 	s.parseContext = ctx
 	if workers := s.Settings.Int("parser_workers"); workers > 0 {
@@ -365,7 +364,7 @@ func (s *Mock) replayWithKeys(w http.ResponseWriter, r *http.Request, c credenti
 		return "", idem{}, false
 	}
 	if rec.ID == "" {
-		if int64(len(keys)) >= s.Settings.Int("memory_parse_cache_max_entries") {
+		if !s.Persistent && int64(len(keys)) >= s.Settings.Int("memory_mock_max_entries") {
 			fail(w, 503, "SERVICE_BUSY")
 			return "", idem{}, false
 		}

@@ -91,7 +91,7 @@ func TestMockParseCacheSharesOnlyResultDataAndRefreshes(t *testing.T) {
 func mockJobs(t *testing.T) *Mock {
 	t.Helper()
 	var values map[string]json.RawMessage
-	const settings = `{"parser_workers":1,"parse_cache_ttl_seconds":300,"max_request_body_bytes":4096,"max_share_text_chars":5000,"max_candidate_urls":4,"user_active_parse_jobs":2,"memory_parse_cache_max_entries":20,"memory_rate_limit_max_subjects":20,"user_parse_per_minute":10,"parse_job_timeout_seconds":25,"result_ttl_seconds":1800,"idempotency_ttl_seconds":3600}`
+	const settings = `{"parser_workers":1,"parse_cache_ttl_seconds":300,"max_request_body_bytes":4096,"max_share_text_chars":5000,"max_candidate_urls":4,"user_active_parse_jobs":2,"memory_parse_cache_max_entries":20,"memory_mock_max_entries":20,"memory_rate_limit_max_subjects":20,"user_parse_per_minute":10,"parse_job_timeout_seconds":25,"result_ttl_seconds":1800,"idempotency_ttl_seconds":3600}`
 	if err := json.Unmarshal([]byte(settings), &values); err != nil {
 		t.Fatal(err)
 	}

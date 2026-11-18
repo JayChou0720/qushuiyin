@@ -144,7 +144,7 @@ func (s *Mock) createJob(w http.ResponseWriter, r *http.Request, c credential) {
 			active++
 		}
 	}
-	if int64(active) >= s.Settings.Int("user_active_parse_jobs") || s.parsePool == nil || int64(len(s.jobs)) >= s.Settings.Int("memory_parse_cache_max_entries") {
+	if int64(active) >= s.Settings.Int("user_active_parse_jobs") || s.parsePool == nil || int64(len(s.jobs)) >= s.Settings.Int("memory_mock_max_entries") {
 		fail(w, 503, "SERVICE_BUSY")
 		return
 	}

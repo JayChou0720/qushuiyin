@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 
-	"qushuiyin/service/internal/config"
 	"qushuiyin/service/internal/outbound"
 	"qushuiyin/service/internal/parse"
 )
@@ -26,10 +25,7 @@ type PreviewStream struct {
 // A preview is a bounded range, never a prepared download or a source URL outlet.
 func (r *Relay) VideoPreview(ctx context.Context, platform string, a parse.Asset, header string, head bool, reserve func(int64) int64) (PreviewStream, error) {
 	var out PreviewStream
-	limits := config.Defaults()
-	limits.Media = r.Settings.Seconds("media_fetch_timeout_seconds")
-	limits.RangeBytes = r.Settings.Int("direct_probe_range_bytes")
-	limits.MediaCandidates = int(r.Settings.Int("max_media_candidates"))
+	limits := r.Settings.Limits()
 	o := (Probe{Client: r.Client, Limits: limits, Domains: r.Domains, Policy: "relay_only"}).Inspect(ctx, platform, a)
 	if o.FinalURL == "" || o.Type != "video/mp4" || o.Size == nil || *o.Size <= 0 {
 		return out, errors.New("FORMAT_UNSUPPORTED")
