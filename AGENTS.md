@@ -11,6 +11,6 @@ Before doing anything, read these files in full, in this order:
 
 Hard rules (details are in the files above):
 
-- The repository root is the only git repository. Do not create nested repositories, do not touch `D:\Projects\去水印-backup\`, and do not push until the owner has added a GitHub remote (doc 03, H1).
+- The repository root is the only git repository. Do not create nested repositories, do not touch `D:\Projects\去水印-backup\`, and only push to GitHub when the owner asks (doc 03 §2).
 - Never modify the parse-video library source; never commit secrets; never hardcode values that belong in spec §16.
 - When the spec is unclear, take the most conservative option, keep going, and record it in `open-questions.md` as doc 03 §1 describes.

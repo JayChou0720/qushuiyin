@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) and other coding age
 
 A WeChat mini-program that parses share links from Douyin, Xiaohongshu, Kuaishou and Bilibili to get the platform's own video, image-set, cover and caption, then saves them to the user's album. "去水印" here means resolving the media source. It does **not** mean pixel inpainting or removing logos and subtitles burned into the video.
 
-No real code exists yet. `qushuiyin_miniapp/` is the untouched WeChat TS quickstart. `qushuiyin_service/` contains only `doc/` (the Go backend is built from scratch per spec V1.1). The repository root is the single git repo; the old per-folder repos and the obsolete Spring Boot template were moved to `D:\Projects\去水印-backup\` (don't touch it). No GitHub remote yet, so don't push (owner step H1).
+No real code exists yet. `qushuiyin_miniapp/` is the untouched WeChat TS quickstart. `qushuiyin_service/` contains only `doc/` (the Go backend is built from scratch per spec V1.1). The repository root is the single git repo; the old per-folder repos and the obsolete Spring Boot template were moved to `D:\Projects\去水印-backup\` (don't touch it). Remote: `https://github.com/JayChou0720/qushuiyin.git` (branch main, reached through the repo-level proxy `127.0.0.1:7897`). Commit locally freely; push only when the owner asks.
 
 ## Spec documents (read before implementing anything)
 
