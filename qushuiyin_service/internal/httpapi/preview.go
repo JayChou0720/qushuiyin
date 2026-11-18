@@ -28,6 +28,16 @@ func (s *Mock) previewTickets(w http.ResponseWriter, r *http.Request, c credenti
 		return
 	}
 	now := time.Now().UTC()
+	if s.Persistent {
+		res, err := s.loadPersistentResult(r.Context(), c.User, r.PathValue("resultId"))
+		if err != nil {
+			fail(w, 404, "RESOURCE_NOT_FOUND")
+			return
+		}
+		s.mu.Lock()
+		s.results[res.ID] = res.result
+		s.mu.Unlock()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	res := s.results[r.PathValue("resultId")]

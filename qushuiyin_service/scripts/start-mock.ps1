@@ -66,6 +66,12 @@ if (-not (Test-Port $DatabasePort)) {
 }
 
 $env:APP_ENV = 'local'
+$settings = [pscustomobject]$settings
+if (-not $settings.EncryptionKey) {
+    $settings | Add-Member -NotePropertyName EncryptionKey -NotePropertyValue (New-Key)
+    $settings | ConvertTo-Json | Set-Content -LiteralPath $state -Encoding UTF8
+}
+$env:DATA_ENCRYPTION_KEYS = 'v1:' + $settings.EncryptionKey
 $env:PARSE_MODE = 'mock'
 $env:WECHAT_DEV_LOGIN = 'true'
 $env:HTTP_ADDR = "127.0.0.1:$ApiPort"

@@ -69,6 +69,9 @@ func (s *Mock) validateEvent(raw json.RawMessage, now time.Time) (clientEvent, s
 }
 
 func (s *Mock) eventOwner(e clientEvent, user string, now time.Time) bool {
+	if s.Persistent {
+		return s.persistentEventOwner(e, user, now)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var jobResult string

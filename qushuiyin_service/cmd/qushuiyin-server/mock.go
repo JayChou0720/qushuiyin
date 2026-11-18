@@ -121,7 +121,13 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 		mock.AdminOrigins[v] = true
 	}
 	// All requests are bounded by the job budget; only small sample files are served.
+	mock.Persistent = true
+	if e = mock.ConfigureTaskKeys(getenv("DATA_ENCRYPTION_KEYS")); e != nil {
+		return e
+	}
 	srv := http.Server{Addr: addr, Handler: mock.Handler(ctx), ReadTimeout: l.Job, WriteTimeout: l.Job, IdleTimeout: settings.Seconds("config_client_cache_seconds")}
+	mock.RunPersistentParse(ctx)
+	mock.RunPersistentMedia(ctx)
 	listener, e := net.Listen("tcp", addr)
 	if e != nil {
 		return errors.New("local HTTP port is unavailable")

@@ -18,6 +18,10 @@ const request = async (method, path, { data, token, key, origin, expect = 200, c
   const payload = await response.json()
   assert.equal(payload.code, code)
   assert.ok(payload.requestId)
+  if (method === 'GET' && /^\/v1\/save-batches\/[^/]+$/.test(path) && payload.data?.status === 'PREPARING') {
+    await delay(payload.data.pollAfterMs || config.limits.poll_interval_ms)
+    return request(method, path, { data, token, key, origin, expect, code })
+  }
   return payload.data ?? payload.error?.details
 }
 const config = await request('GET', '/v1/config')

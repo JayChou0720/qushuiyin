@@ -14,6 +14,7 @@ import (
 )
 
 type batch struct {
+	Version                                    uint64
 	ID, User, ResultID, ClientActionID, Status string
 	FlowID                                     string
 	ExpiresAt                                  time.Time
@@ -21,6 +22,8 @@ type batch struct {
 	Cancelled                                  bool
 }
 type item struct {
+	FileID, MIME, Hash                  string
+	Size                                int64
 	ID, ObjectID, Status, Mode, Failure string
 	Asset                               asset
 	Attempt                             int64
@@ -43,6 +46,16 @@ func (s *Mock) createBatch(w http.ResponseWriter, r *http.Request, c credential)
 		return
 	}
 	now := time.Now().UTC()
+	if s.Persistent {
+		res, err := s.loadPersistentResult(r.Context(), c.User, req.ResultID)
+		if err != nil {
+			fail(w, 404, "RESOURCE_NOT_FOUND")
+			return
+		}
+		s.mu.Lock()
+		s.results[res.ID] = res.result
+		s.mu.Unlock()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.prune(now)
@@ -145,14 +158,14 @@ func (s *Mock) batchStatus(w http.ResponseWriter, r *http.Request, c credential)
 	if r.Method == "DELETE" {
 		b.Cancelled = true
 		for i := range b.Items {
-			if b.Items[i].Status == "PREPARING" {
+			if b.Items[i].Status == "PREPARING" || b.Items[i].Status == "PENDING" {
 				b.Items[i].Status = "CANCELLED"
 			}
 		}
 	} else if !b.Cancelled {
 		now := time.Now().UTC()
 		for i := range b.Items {
-			if b.Items[i].Status == "PREPARING" {
+			if !s.Persistent && b.Items[i].Status == "PREPARING" {
 				s.prepare(b, &b.Items[i], now)
 			}
 		}
@@ -172,6 +185,10 @@ func (s *Mock) batchStatus(w http.ResponseWriter, r *http.Request, c credential)
 			}
 			kind = mime
 			size = len(raw)
+			if s.Relay != nil {
+				kind = x.MIME
+				size = x.Size
+			}
 		}
 		if x.Failure != "" {
 			failure = issue(x.Failure)
@@ -268,6 +285,19 @@ func (s *Mock) download(mode string) http.HandlerFunc {
 		if err != nil {
 			fail(w, 403, "ACCESS_DENIED")
 			return
+		}
+		if s.Relay != nil && mode == "relay" {
+			s.relayDownload(w, r, uid, bid, oid)
+			return
+		}
+		if s.Persistent {
+			s.persistentGate.Lock()
+			err = s.loadBatches(r.Context(), uid)
+			s.persistentGate.Unlock()
+			if err != nil {
+				fail(w, 503, "SERVICE_BUSY")
+				return
+			}
 		}
 		s.mu.Lock()
 		kind := ""

@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -115,6 +117,10 @@ func (s *Mock) createJob(w http.ResponseWriter, r *http.Request, c credential) {
 		return
 	}
 	now := time.Now().UTC()
+	if s.Persistent {
+		s.createPersistentParse(w, r, c, req, selected, p)
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.prune(now)
@@ -214,6 +220,10 @@ func (s *Mock) jobAccepted(w http.ResponseWriter, j *job) {
 	ok(w, 202, dto{"jobId": j.ID, "status": j.Status, "pollAfterMs": s.Settings.Int("poll_interval_ms"), "deadlineAt": j.Deadline})
 }
 func (s *Mock) jobStatus(w http.ResponseWriter, r *http.Request, c credential) {
+	if s.Persistent {
+		s.persistentJobStatus(w, r, c)
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	j := s.jobs[r.PathValue("jobId")]
@@ -253,6 +263,20 @@ func (a asset) public() dto {
 	return dto{"assetId": a.ID, "type": a.Kind, "role": a.Role, "order": a.Order, "mimeType": nil, "width": nil, "height": nil, "sizeBytes": nil, "converted": false, "previewUrl": nil, "previewExpiresAt": nil, "availability": "candidate", "reasonCode": nil}
 }
 func (s *Mock) resultData(w http.ResponseWriter, r *http.Request, c credential) {
+	if s.Persistent {
+		res, err := s.loadPersistentResult(r.Context(), c.User, r.PathValue("resultId"))
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				fail(w, 404, "RESOURCE_NOT_FOUND")
+			} else {
+				fail(w, 503, "SERVICE_BUSY")
+			}
+			return
+		}
+		view := Mock{results: map[string]*result{res.ID: res.result}}
+		view.resultData(w, r, c)
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	x := s.results[r.PathValue("resultId")]

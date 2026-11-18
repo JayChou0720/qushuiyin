@@ -16,6 +16,7 @@ import (
 
 	"qushuiyin/service/internal/auth"
 	"qushuiyin/service/internal/config"
+	"qushuiyin/service/internal/media"
 	"qushuiyin/service/internal/parse"
 )
 
@@ -28,6 +29,11 @@ type Platform struct {
 	Text   bool   `json:"textEnabled"`
 }
 type Mock struct {
+	Persistent     bool
+	persistentGate sync.Mutex
+	TaskKeys       map[string][]byte
+	TaskKeyVersion string
+	Relay          *media.Relay
 	Admin          auth.AdminStore
 	AdminHost      string
 	AdminOrigins   map[string]bool
@@ -157,6 +163,10 @@ func (s *Mock) authorized(next authed) http.HandlerFunc {
 		}
 		if err != nil {
 			fail(w, 503, "SERVICE_BUSY")
+			return
+		}
+		if s.Persistent && (r.URL.Path == "/v1/save-batches" || strings.HasPrefix(r.URL.Path, "/v1/save-batches/")) {
+			s.persistentBatchRequest(w, r, c, next)
 			return
 		}
 		next(w, r, c)
