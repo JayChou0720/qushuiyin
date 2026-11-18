@@ -1,0 +1,383 @@
+-- +goose NO TRANSACTION
+-- +goose Up
+CREATE TABLE IF NOT EXISTS app_user (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  app_id VARCHAR(64) NOT NULL,
+  subject_hash CHAR(64),
+  status VARCHAR(20) NOT NULL,
+  deleted_at DATETIME(3),
+  UNIQUE(app_id,subject_hash)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS platform_config (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  platform VARCHAR(32) NOT NULL UNIQUE,
+  status VARCHAR(20) NOT NULL,
+  capabilities JSON NOT NULL,
+  share_domains JSON NOT NULL,
+  adapter_name VARCHAR(100) NOT NULL,
+  adapter_version VARCHAR(100) NOT NULL,
+  credential_ref VARCHAR(200),
+  message VARCHAR(200) NOT NULL DEFAULT '',
+  last_verified_at DATETIME(3),
+  version INT UNSIGNED NOT NULL DEFAULT 1
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS system_config (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  config_key VARCHAR(100) NOT NULL,
+  value_json JSON NOT NULL,
+  version INT UNSIGNED NOT NULL DEFAULT 1,
+  published_at DATETIME(3) NOT NULL,
+  operator_id VARCHAR(64) NOT NULL,
+  reason VARCHAR(500) NOT NULL,
+  UNIQUE(config_key,version)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS idempotency_record (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  user_id VARCHAR(64) NOT NULL,
+  operation VARCHAR(100) NOT NULL,
+  key_value VARCHAR(100) NOT NULL,
+  payload_hash CHAR(64) NOT NULL,
+  object_type VARCHAR(32) NOT NULL,
+  object_id VARCHAR(64) NOT NULL,
+  expires_at DATETIME(3) NOT NULL,
+  UNIQUE(user_id,operation,key_value),
+  INDEX(expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS app_session (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  user_id VARCHAR(64) NOT NULL,
+  token_digest CHAR(64) NOT NULL UNIQUE,
+  session_version INT NOT NULL,
+  expires_at DATETIME(3) NOT NULL,
+  revoked_at DATETIME(3),
+  INDEX(user_id),
+  INDEX(expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS admin_user (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  username VARCHAR(64) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  role VARCHAR(20) NOT NULL,
+  status VARCHAR(20) NOT NULL,
+  failed_login_count INT UNSIGNED NOT NULL DEFAULT 0,
+  locked_until DATETIME(3),
+  last_login_at DATETIME(3),
+  version INT UNSIGNED NOT NULL DEFAULT 1
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS admin_session (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  admin_user_id VARCHAR(64) NOT NULL,
+  token_digest CHAR(64) NOT NULL UNIQUE,
+  expires_at DATETIME(3) NOT NULL,
+  revoked_at DATETIME(3),
+  ip_hash CHAR(64) NOT NULL,
+  INDEX(admin_user_id),
+  INDEX(expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS parse_job (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  user_id VARCHAR(64) NOT NULL,
+  flow_id VARCHAR(64) NOT NULL,
+  platform VARCHAR(32),
+  status VARCHAR(20) NOT NULL,
+  cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+  source_hash CHAR(64) NOT NULL,
+  source_url_enc TEXT,
+  source_expires_at DATETIME(3),
+  adapter_version VARCHAR(100) NOT NULL,
+  result_id VARCHAR(64),
+  error_code VARCHAR(64),
+  started_at DATETIME(3),
+  finished_at DATETIME(3),
+  deadline_at DATETIME(3) NOT NULL,
+  attempt INT UNSIGNED NOT NULL DEFAULT 0,
+  lease_owner VARCHAR(64),
+  lease_expires_at DATETIME(3),
+  claim_seq BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  version INT UNSIGNED NOT NULL DEFAULT 1,
+  INDEX(status,deadline_at),
+  INDEX(user_id,created_at),
+  INDEX(lease_expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS parse_result (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  user_id VARCHAR(64) NOT NULL,
+  job_id VARCHAR(64) NOT NULL,
+  platform VARCHAR(32) NOT NULL,
+  content_id VARCHAR(128),
+  media_type VARCHAR(16) NOT NULL,
+  title VARCHAR(200),
+  description TEXT,
+  author_name VARCHAR(200),
+  duration_ms BIGINT UNSIGNED,
+  warnings JSON NOT NULL,
+  expires_at DATETIME(3) NOT NULL,
+  source_hash CHAR(64) NOT NULL,
+  adapter_version VARCHAR(100) NOT NULL,
+  INDEX(user_id,expires_at),
+  INDEX(job_id),
+  INDEX(expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS media_asset (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  user_id VARCHAR(64) NOT NULL,
+  result_id VARCHAR(64) NOT NULL,
+  type VARCHAR(16) NOT NULL,
+  role VARCHAR(16) NOT NULL,
+  order_no INT UNSIGNED NOT NULL,
+  source_candidates_enc MEDIUMTEXT NOT NULL,
+  source_expiry DATETIME(3),
+  mime_type VARCHAR(100),
+  width INT UNSIGNED,
+  height INT UNSIGNED,
+  size_bytes BIGINT UNSIGNED,
+  availability VARCHAR(20) NOT NULL,
+  reason_code VARCHAR(64),
+  version INT UNSIGNED NOT NULL DEFAULT 1,
+  UNIQUE(result_id,role,order_no),
+  INDEX(user_id,result_id),
+  INDEX(source_expiry)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS media_file (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  share_key CHAR(64),
+  output_version VARCHAR(100) NOT NULL,
+  storage_key VARCHAR(500) NOT NULL,
+  status VARCHAR(20) NOT NULL,
+  mime_type VARCHAR(100),
+  size_bytes BIGINT UNSIGNED,
+  sha256 CHAR(64),
+  converted BOOLEAN NOT NULL DEFAULT FALSE,
+  ready_at DATETIME(3),
+  expires_at DATETIME(3) NOT NULL,
+  last_access_at DATETIME(3),
+  version INT UNSIGNED NOT NULL DEFAULT 1,
+  UNIQUE(share_key,output_version),
+  INDEX(status,expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS media_object (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  user_id VARCHAR(64) NOT NULL,
+  asset_id VARCHAR(64) NOT NULL,
+  file_id VARCHAR(64) NOT NULL,
+  output_version VARCHAR(100) NOT NULL,
+  status VARCHAR(20) NOT NULL,
+  expires_at DATETIME(3) NOT NULL,
+  last_access_at DATETIME(3),
+  version INT UNSIGNED NOT NULL DEFAULT 1,
+  UNIQUE(user_id,asset_id,output_version),
+  INDEX(file_id),
+  INDEX(status,expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS save_batch (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  user_id VARCHAR(64) NOT NULL,
+  result_id VARCHAR(64) NOT NULL,
+  flow_id VARCHAR(64) NOT NULL,
+  client_action_id VARCHAR(64) NOT NULL,
+  status VARCHAR(20) NOT NULL,
+  cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+  refresh_attempt INT UNSIGNED NOT NULL DEFAULT 0,
+  deadline_at DATETIME(3) NOT NULL,
+  expires_at DATETIME(3) NOT NULL,
+  version INT UNSIGNED NOT NULL DEFAULT 1,
+  UNIQUE(user_id,client_action_id),
+  INDEX(user_id,created_at),
+  INDEX(expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS save_batch_item (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  user_id VARCHAR(64) NOT NULL,
+  batch_id VARCHAR(64) NOT NULL,
+  asset_id VARCHAR(64) NOT NULL,
+  order_no INT UNSIGNED NOT NULL,
+  prepare_status VARCHAR(20) NOT NULL,
+  delivery_mode VARCHAR(16),
+  direct_fallback_used BOOLEAN NOT NULL DEFAULT FALSE,
+  direct_url_enc TEXT,
+  direct_host VARCHAR(253),
+  direct_expires_at DATETIME(3),
+  probe_mime_type VARCHAR(100),
+  probe_size_bytes BIGINT UNSIGNED,
+  copy_link_available BOOLEAN NOT NULL DEFAULT FALSE,
+  key_version INT UNSIGNED,
+  media_object_id VARCHAR(64),
+  attempt INT UNSIGNED NOT NULL,
+  error_code VARCHAR(64),
+  lease_owner VARCHAR(64),
+  lease_expires_at DATETIME(3),
+  claim_seq BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  version INT UNSIGNED NOT NULL DEFAULT 1,
+  UNIQUE(batch_id,asset_id),
+  INDEX(prepare_status,lease_expires_at),
+  INDEX(batch_id,order_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS feedback (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  user_id VARCHAR(64) NOT NULL,
+  category VARCHAR(32) NOT NULL,
+  content VARCHAR(500) NOT NULL,
+  contact_enc TEXT,
+  trace_id VARCHAR(64),
+  source_url_enc TEXT,
+  source_consent BOOLEAN NOT NULL DEFAULT FALSE,
+  status VARCHAR(20) NOT NULL,
+  reply TEXT,
+  replied_at DATETIME(3),
+  expires_at DATETIME(3) NOT NULL,
+  version INT UNSIGNED NOT NULL DEFAULT 1,
+  INDEX(user_id,created_at),
+  INDEX(status,created_at),
+  INDEX(expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS event_ingest (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  event_id VARCHAR(64) NOT NULL UNIQUE,
+  user_id VARCHAR(64),
+  name VARCHAR(64) NOT NULL,
+  flow_id VARCHAR(64),
+  client_action_id VARCHAR(64),
+  job_id VARCHAR(64),
+  batch_id VARCHAR(64),
+  item_id VARCHAR(64),
+  delivery_mode VARCHAR(16),
+  stage VARCHAR(32) NOT NULL,
+  outcome VARCHAR(32) NOT NULL,
+  error_code VARCHAR(64),
+  duration_ms BIGINT UNSIGNED,
+  bytes BIGINT UNSIGNED,
+  client_time DATETIME(3) NOT NULL,
+  received_at DATETIME(3) NOT NULL,
+  client_version VARCHAR(32) NOT NULL,
+  os_family VARCHAR(20) NOT NULL,
+  INDEX(received_at),
+  INDEX(user_id,received_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS daily_metric (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  stat_date DATE NOT NULL,
+  platform VARCHAR(32) NOT NULL,
+  stage VARCHAR(32) NOT NULL,
+  outcome VARCHAR(32) NOT NULL,
+  source_kind VARCHAR(20) NOT NULL,
+  delivery_mode VARCHAR(16) NOT NULL,
+  count BIGINT UNSIGNED NOT NULL,
+  bytes BIGINT UNSIGNED NOT NULL,
+  duration_sum_ms BIGINT UNSIGNED NOT NULL,
+  UNIQUE(stat_date,platform,stage,outcome,source_kind,delivery_mode)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS admin_audit (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  operator_id VARCHAR(64) NOT NULL,
+  action VARCHAR(64) NOT NULL,
+  target_type VARCHAR(32) NOT NULL,
+  target_id VARCHAR(64) NOT NULL,
+  before_redacted JSON,
+  after_redacted JSON,
+  reason VARCHAR(500) NOT NULL,
+  request_id VARCHAR(64) NOT NULL,
+  INDEX(operator_id,created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS cleanup_job (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  user_id VARCHAR(64),
+  kind VARCHAR(32) NOT NULL,
+  status VARCHAR(20) NOT NULL,
+  attempt INT UNSIGNED NOT NULL DEFAULT 0,
+  deadline_at DATETIME(3) NOT NULL,
+  last_error_code VARCHAR(64),
+  lease_expires_at DATETIME(3),
+  version INT UNSIGNED NOT NULL DEFAULT 1,
+  INDEX(user_id),
+  INDEX(status,deadline_at),
+  INDEX(lease_expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS usage_counter (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  subject_key VARCHAR(128) NOT NULL,
+  stat_date DATE NOT NULL,
+  kind VARCHAR(32) NOT NULL,
+  value BIGINT UNSIGNED NOT NULL,
+  UNIQUE(subject_key,stat_date,kind)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- +goose Down
+DROP TABLE IF EXISTS usage_counter;
+DROP TABLE IF EXISTS cleanup_job;
+DROP TABLE IF EXISTS admin_audit;
+DROP TABLE IF EXISTS daily_metric;
+DROP TABLE IF EXISTS event_ingest;
+DROP TABLE IF EXISTS feedback;
+DROP TABLE IF EXISTS save_batch_item;
+DROP TABLE IF EXISTS save_batch;
+DROP TABLE IF EXISTS media_object;
+DROP TABLE IF EXISTS media_file;
+DROP TABLE IF EXISTS media_asset;
+DROP TABLE IF EXISTS parse_result;
+DROP TABLE IF EXISTS parse_job;
+DROP TABLE IF EXISTS admin_session;
+DROP TABLE IF EXISTS admin_user;
+DROP TABLE IF EXISTS app_session;
+DROP TABLE IF EXISTS idempotency_record;
+DROP TABLE IF EXISTS system_config;
+DROP TABLE IF EXISTS platform_config;
+DROP TABLE IF EXISTS app_user;

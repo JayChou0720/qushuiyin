@@ -1,0 +1,20 @@
+<view class="screen stack">
+  <view class="row spread"><text class="title">解析结果</text><text class="badge">本地演练</text></view>
+  <text wx:if="{{error}}" class="error" role="alert">{{error}}</text>
+  <text wx:if="{{!error && !result}}" class="muted">正在读取结果</text>
+  <button wx:if="{{error && !result}}" class="action" bindtap="load">重试</button>
+  <block wx:if="{{result}}">
+    <view class="surface stack">
+      <text class="section-title">{{result.title || '未命名作品'}}</text>
+      <text class="muted">{{result.mediaType === 'video' ? '视频' : '图集'}} · {{result.assetCount}} 项</text>
+      <checkbox-group wx:if="{{result.mediaType === 'image'}}">
+        <label wx:for="{{result.assets}}" wx:key="assetId" class="asset-option" bindtap="toggle" data-asset="{{item.assetId}}"><checkbox checked="{{selected[item.assetId]}}" disabled="{{busy}}" />图片 {{item.order}}</label>
+      </checkbox-group>
+      <view wx:if="{{result.description}}" class="stack"><text class="caption">{{result.description}}</text><button class="action" bindtap="copy" hover-class="button-press">复制文案</button></view>
+    </view>
+    <text wx:if="{{status}}" class="muted" aria-live="polite">{{status}}</text>
+    <button class="action primary" disabled="{{busy || !count}}" loading="{{busy}}" bindtap="save" hover-class="button-press"><image class="icon" src="/icons/download.svg" />{{result.mediaType === 'video' ? '演练保存视频' : '演练保存 ' + count + ' 张图片'}}</button>
+    <button wx:if="{{result.cover}}" class="action" disabled="{{busy}}" bindtap="saveCover" hover-class="button-press">演练保存封面</button>
+    <button wx:if="{{busy}}" class="action quiet" bindtap="cancel">取消下载</button>
+  </block>
+</view>

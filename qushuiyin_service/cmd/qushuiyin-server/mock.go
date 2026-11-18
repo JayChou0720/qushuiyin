@@ -1,0 +1,139 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+
+	"qushuiyin/service/internal/auth"
+	"qushuiyin/service/internal/config"
+	"qushuiyin/service/internal/httpapi"
+	"qushuiyin/service/internal/parse"
+)
+
+func mockCommand(ctx context.Context, command string, getenv func(string) string, out io.Writer) error {
+	env := getenv("APP_ENV")
+	if (env != "local" && env != "test") || getenv("PARSE_MODE") != "mock" {
+		return errors.New("mock command requires APP_ENV=local or test and PARSE_MODE=mock")
+	}
+	addr := getenv("HTTP_ADDR")
+	host, port, e := net.SplitHostPort(addr)
+	if e != nil || !config.LoopbackHost(host) || port == "" || port == "0" {
+		return errors.New("HTTP_ADDR must be an explicit loopback address and port")
+	}
+	origin := getenv("MOCK_MEDIA_ORIGIN")
+	if origin == "" {
+		origin = "http://" + addr
+	}
+	u, e := config.LoopbackOrigin(origin)
+	if e != nil || u.Host != addr {
+		return errors.New("M1 mock media origin must match HTTP_ADDR")
+	}
+	dsn := getenv("MYSQL_DSN")
+	if dsn == "" {
+		return errors.New("MYSQL_DSN required")
+	}
+	db, e := sql.Open("mysql", dsn)
+	if e != nil {
+		return errors.New("invalid database configuration")
+	}
+	defer db.Close()
+	var name string
+	if e = db.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&name); e != nil || (name != "qushuiyin_dev" && name != "qushuiyin_test") {
+		return errors.New("mock mode requires a reachable qushuiyin_dev or qushuiyin_test database")
+	}
+	if command == "seed" {
+		if e = seedMock(ctx, db, u.Hostname()); e != nil {
+			return errors.New("seed failed; run migrate up first")
+		}
+		fmt.Fprintln(out, "mock seed ready")
+		return nil
+	}
+	key, e := base64.StdEncoding.DecodeString(getenv("HMAC_KEY"))
+	if e != nil || len(key) < 32 {
+		return errors.New("HMAC_KEY must be base64 and at least 32 bytes")
+	}
+	ticketKey, e := base64.StdEncoding.DecodeString(getenv("TICKET_SIGNING_KEY"))
+	if e != nil || len(ticketKey) < 32 || string(ticketKey) == string(key) {
+		return errors.New("set a separate base64 TICKET_SIGNING_KEY (at least 32 bytes)")
+	}
+	settings, e := config.Load(ctx, db)
+	if e != nil {
+		return errors.New("configuration unavailable; run migrate up first")
+	}
+	if e = settings.Validate("session_ttl_seconds", "max_request_body_bytes", "max_share_text_chars", "max_candidate_urls", "max_image_batch_count", "parse_job_timeout_seconds", "poll_interval_ms", "result_ttl_seconds", "batch_ttl_seconds", "batch_prepare_timeout_seconds", "client_download_timeout_seconds", "ticket_safety_margin_seconds", "media_ticket_ttl_seconds", "idempotency_ttl_seconds", "media_gc_interval_seconds", "user_active_parse_jobs", "user_active_save_batches", "memory_parse_cache_max_entries", "memory_rate_limit_max_subjects", "ip_parse_requests_per_minute", "user_parse_per_minute", "user_download_url_requests_per_minute"); e != nil {
+		return e
+	}
+	platforms, policy, e := mockPlatforms(ctx, db)
+	if e != nil {
+		return errors.New("platform configuration unavailable")
+	}
+	l := config.Defaults()
+	l.Assets = int(settings.Int("max_result_assets"))
+	l.Title = int(settings.Int("max_title_chars"))
+	l.Description = int(settings.Int("max_description_chars"))
+	l.Job = settings.Seconds("parse_job_timeout_seconds")
+	l.ParserCall = settings.Seconds("parser_call_timeout_seconds")
+	parser, e := parse.Mock(l, policy)
+	if e != nil {
+		return errors.New("invalid parser fixtures")
+	}
+	mock := httpapi.Mock{Settings: settings, Sessions: auth.Store{DB: db, Key: key, TTL: settings.Seconds("session_ttl_seconds")}, TicketKey: ticketKey, Adapter: parser, Platforms: platforms, Origin: origin, DevLogin: env == "local" && getenv("WECHAT_DEV_LOGIN") == "true"}
+	// All requests are bounded by the job budget; only small sample files are served.
+	srv := http.Server{Addr: addr, Handler: mock.Handler(), ReadTimeout: l.Job, WriteTimeout: l.Job, IdleTimeout: settings.Seconds("config_client_cache_seconds")}
+	listener, e := net.Listen("tcp", addr)
+	if e != nil {
+		return errors.New("local HTTP port is unavailable")
+	}
+	go mock.Clean(ctx)
+	go func() { <-ctx.Done(); _ = srv.Close() }()
+	fmt.Fprintln(out, "mock API listening at "+origin)
+	if e = srv.Serve(listener); errors.Is(e, http.ErrServerClosed) {
+		return nil
+	}
+	return e
+}
+func seedMock(ctx context.Context, db *sql.DB, host string) error {
+	tx, e := db.BeginTx(ctx, nil)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	_, e = tx.ExecContext(ctx, "UPDATE platform_config SET status='enabled',capabilities=JSON_SET(capabilities,'$.videoEnabled',CAST('true' AS JSON),'$.imageEnabled',CAST(IF(platform='bilibili','false','true') AS JSON),'$.coverEnabled',CAST('true' AS JSON),'$.textEnabled',CAST('true' AS JSON)),version=version+1 WHERE platform IN ('douyin','xiaohongshu','kuaishou','bilibili') AND status='disabled'")
+	if e != nil {
+		return e
+	}
+	_, e = tx.ExecContext(ctx, "INSERT INTO download_domain(id,platform,host,status,first_seen_at,last_seen_at,created_at,updated_at,seen_count,registered_at) VALUES (?,'mock',?,'registered',UTC_TIMESTAMP(3),UTC_TIMESTAMP(3),UTC_TIMESTAMP(3),UTC_TIMESTAMP(3),0,UTC_TIMESTAMP(3)) ON DUPLICATE KEY UPDATE status=status", auth.ID(), host)
+	if e != nil {
+		return e
+	}
+	return tx.Commit()
+}
+func mockPlatforms(ctx context.Context, db *sql.DB) ([]httpapi.Platform, map[string]parse.Capability, error) {
+	rows, e := db.QueryContext(ctx, "SELECT platform,status,capabilities FROM platform_config ORDER BY platform")
+	if e != nil {
+		return nil, nil, e
+	}
+	defer rows.Close()
+	var list []httpapi.Platform
+	policy := map[string]parse.Capability{}
+	for rows.Next() {
+		var row httpapi.Platform
+		var caps []byte
+		if e = rows.Scan(&row.Name, &row.Status, &caps); e != nil {
+			return nil, nil, e
+		}
+		if e = json.Unmarshal(caps, &row); e != nil {
+			return nil, nil, e
+		}
+		policy[row.Name] = parse.Capability{Status: row.Status, Video: row.Video, Image: row.Image, Cover: row.Cover, Text: row.Text}
+		list = append(list, row)
+	}
+	return list, policy, rows.Err()
+}

@@ -1,6 +1,19 @@
-# Go 服务：M0 能力验证
+# Go 服务：本地开发
 
-目前的命令用于解析能力验证和 CDN 主机采集。平台能力仍待实测确认，小程序和业务 HTTP 服务不在本阶段启动。
+## M1：小程序 Mock 联调
+
+Windows 下，从仓库根目录启动。脚本需要 Go 和 MySQL 8.4（`mysqld.exe` 需在 PATH 中），会启动隔离的开发库（默认端口 33316），执行迁移与开发种子，并在 `http://127.0.0.1:18080` 提供 Mock API 和样本文件。现有 MySQL 不会被改动。
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ./qushuiyin_service/scripts/start-mock.ps1 -Background
+node ./qushuiyin_service/scripts/smoke-mock.mjs
+```
+
+在微信开发者工具中打开 `qushuiyin_miniapp/`。首页点「填入示例」可测试视频；粘贴 `https://www.xiaohongshu.com/explore/10002` 可测试图集。结果页的保存按钮下载本地样本到临时文件，当前不写入相册。开发登录和样本只用于本机联调，不访问平台的真实媒体。小程序体验版或正式版不使用本地地址。
+
+## M0：能力验证
+
+以下命令用于解析能力验证和 CDN 主机采集。
 
 在本目录运行（Go 未进入当前终端 PATH 时用 `D:\Go\bin\go.exe`）：
 

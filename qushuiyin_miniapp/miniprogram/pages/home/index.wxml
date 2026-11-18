@@ -1,0 +1,20 @@
+<view class="screen stack">
+  <view class="row spread"><text class="title">解析作品</text><text class="badge">本地演练</text></view>
+  <view class="surface stack">
+    <view class="row spread"><label class="section-title" for="share">分享链接</label><button class="action quiet" disabled="{{busy || !inputReady}}" bindtap="example" hover-class="button-press">填入示例</button></view>
+    <textarea id="share" class="share-input" placeholder="粘贴链接或分享文案" value="{{text}}" maxlength="{{maxLength}}" disabled="{{busy || !inputReady}}" bindinput="edit" />
+    <text wx:if="{{error}}" class="error" role="alert">{{error}}</text>
+    <button wx:for="{{candidates}}" wx:key="url" class="action" bindtap="choose" data-index="{{index}}">链接 {{index + 1}} · {{item.displayHost}}</button>
+    <view class="row input-actions">
+      <button class="action" disabled="{{busy || !inputReady}}" bindtap="paste" hover-class="button-press"><image class="icon" src="/icons/clipboard.svg" />粘贴</button>
+      <button class="action primary grow" disabled="{{busy || !inputReady}}" loading="{{busy}}" bindtap="parse" hover-class="button-press">{{busy ? '正在解析' : '开始解析'}}</button>
+    </view>
+    <button wx:if="{{busy}}" class="action quiet" bindtap="cancel">取消解析</button>
+    <button wx:if="{{!inputReady && error}}" class="action" bindtap="reloadConfig">重试连接</button>
+  </view>
+  <view wx:if="{{platforms.length}}" class="stack platform-section">
+    <text class="section-title">演练平台</text>
+    <view class="platforms"><text class="platform {{item.available ? 'available' : ''}}" wx:for="{{platforms}}" wx:key="name">{{item.name}}{{item.available ? '' : ' · 未开放'}}</text></view>
+  </view>
+  <navigator class="muted help-link" url="/pages/help/index">使用帮助</navigator>
+</view>
