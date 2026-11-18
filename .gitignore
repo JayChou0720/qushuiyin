@@ -1,0 +1,36 @@
+# Secrets and local-only files (doc 03 §3.4, §3.5)
+.env
+.env.*
+*.local.json
+*.local.md
+
+# Go build output
+/qushuiyin_service/bin/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Runtime data: relayed media, thumbnails, partial downloads
+/qushuiyin_service/data/
+/qushuiyin_service/media/
+*.part
+
+# Admin frontend build output: keep only the placeholder (doc 03 §4.2)
+/qushuiyin_service/internal/admin/dist/*
+!/qushuiyin_service/internal/admin/dist/index.html
+
+# Node
+node_modules/
+/qushuiyin_service/web/admin/dist/
+
+# WeChat mini-program: per-developer settings and npm build output
+/qushuiyin_miniapp/project.private.config.json
+miniprogram_npm/
+
+# IDE and OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
