@@ -11,7 +11,15 @@ node ./qushuiyin_service/scripts/smoke-mock.mjs
 
 在微信开发者工具中打开 `qushuiyin_miniapp/`。首页点「填入示例」可测试视频；粘贴 `https://www.xiaohongshu.com/explore/10002` 可测试图集。结果页的保存按钮下载本地样本到临时文件，当前不写入相册。开发登录和样本只用于本机联调，不访问平台的真实媒体。小程序体验版或正式版不使用本地地址。
 
-如果开发者工具提示回环地址不在合法域名中，用独立的本地调试副本，并在副本的 `project.private.config.json` 设置 `setting.urlCheck=false`。不要提交该设置或用它验证线上域名。默认端口占用时，接口测试可用 `start-mock.ps1 -Background -ApiPort 18081` 和 `node ./qushuiyin_service/scripts/smoke-mock.mjs 18081`；小程序本地地址仍为默认的 18080。
+结果页点「播放视频」或图集的「预览」可检查样本预览。以下链接仅用作 Mock 输入，不会访问真实媒体：
+
+| 输入 | 预期保存结果 |
+| --- | --- |
+| `https://www.douyin.com/video/10004` | 首次准备超时；点「重试未完成项」后下载成功。 |
+| `https://www.douyin.com/video/10005` | 模拟直连被拒，自动切换中转并下载成功。 |
+| `https://www.douyin.com/video/10006` | 模拟直连被拒且无法中转，提供短期 Mock 下载链接。 |
+
+如果开发者工具提示回环地址不在合法域名中，用独立的本地调试副本，并在副本的 `project.private.config.json` 设置 `setting.urlCheck=false`。不要提交该设置或用它验证线上域名。默认端口占用时，接口测试可用 `start-mock.ps1 -Background -ApiPort 18082` 和 `node ./qushuiyin_service/scripts/smoke-mock.mjs 18082`；小程序本地地址仍为默认的 18080。
 
 管理员账号与小程序账号分开。设置本机 `MYSQL_DSN` 并迁移后，用 `qushuiyin-server admin create --username ops --role super_admin` 创建首个管理员；终端会要求两次不回显的密码输入。管理会话仅通过 `/admin` 路径的安全 Cookie 签发，修改请求校验 `Origin`。管理员接口的 MySQL 集成测试使用 `MYSQL_TEST_DSN`，只对本地 `qushuiyin_test` 运行。
 

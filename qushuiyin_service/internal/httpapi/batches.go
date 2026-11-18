@@ -17,10 +17,14 @@ type batch struct {
 	ID, User, ResultID, ClientActionID, Status string
 	ExpiresAt                                  time.Time
 	Items                                      []item
+	Cancelled                                  bool
 }
 type item struct {
-	ID, ObjectID string
-	Asset        asset
+	ID, ObjectID, Status, Mode, Failure string
+	Asset                               asset
+	Attempt                             int64
+	Deadline, AvailableUntil            time.Time
+	Fallback, CopyAvailable             bool
 }
 type batchRequest struct {
 	ResultID               string
@@ -101,7 +105,7 @@ func (s *Mock) createBatch(w http.ResponseWriter, r *http.Request, c credential)
 			fail(w, 400, "BAD_REQUEST")
 			return
 		}
-		b.Items = append(b.Items, item{auth.ID(), auth.ID(), a})
+		b.Items = append(b.Items, item{ID: auth.ID(), Asset: a, Status: "PREPARING", Attempt: 1, Deadline: minTime(b.ExpiresAt, now.Add(s.Settings.Seconds("batch_prepare_timeout_seconds")))})
 	}
 	sort.Slice(b.Items, func(i, j int) bool { return b.Items[i].Asset.Order < b.Items[j].Asset.Order })
 	s.batches[b.ID] = b
@@ -138,26 +142,45 @@ func (s *Mock) batchStatus(w http.ResponseWriter, r *http.Request, c credential)
 		return
 	}
 	if r.Method == "DELETE" {
-		b.Status = "CANCELLED"
-	} else if b.Status == "PREPARING" {
-		b.Status = "READY"
+		b.Cancelled = true
+		for i := range b.Items {
+			if b.Items[i].Status == "PREPARING" {
+				b.Items[i].Status = "CANCELLED"
+			}
+		}
+	} else if !b.Cancelled {
+		now := time.Now().UTC()
+		for i := range b.Items {
+			if b.Items[i].Status == "PREPARING" {
+				s.prepare(b, &b.Items[i], now)
+			}
+		}
+		s.refreshBatch(b, now)
 	}
+	b.aggregate()
 	items := make([]dto, 0, len(b.Items))
 	for _, x := range b.Items {
-		var mode, oid, kind, size any
-		if b.Status == "READY" {
+		var mode, oid, kind, size, failure any
+		if x.Mode != "" {
+			mode = x.Mode
+		}
+		if x.Status == "READY" {
 			mime, raw := fixture.File(x.Asset.Kind)
-			mode = "relay"
-			oid = x.ObjectID
+			if x.Mode == "relay" {
+				oid = x.ObjectID
+			}
 			kind = mime
 			size = len(raw)
 		}
-		items = append(items, dto{"itemId": x.ID, "assetId": x.Asset.ID, "order": x.Asset.Order, "prepareStatus": b.Status, "deliveryMode": mode, "copyLinkAvailable": false, "attempt": 1, "mediaObjectId": oid, "mimeType": kind, "sizeBytes": size, "converted": false, "error": nil})
+		if x.Failure != "" {
+			failure = issue(x.Failure)
+		}
+		items = append(items, dto{"itemId": x.ID, "assetId": x.Asset.ID, "order": x.Asset.Order, "prepareStatus": x.Status, "deliveryMode": mode, "copyLinkAvailable": x.CopyAvailable && !b.Cancelled, "attempt": x.Attempt, "mediaObjectId": oid, "mimeType": kind, "sizeBytes": size, "converted": false, "error": failure})
 	}
 	ok(w, 200, dto{"batchId": b.ID, "status": b.Status, "expiresAt": b.ExpiresAt, "items": items})
 }
-func (s *Mock) signature(bid, oid, digest, expire string) string {
-	return auth.Digest(s.TicketKey, "mock-download:"+bid+":"+oid+":"+digest+":"+expire)
+func (s *Mock) signature(mode, bid, oid, digest, expire string) string {
+	return auth.Digest(s.TicketKey, "mock-download:"+mode+":"+bid+":"+oid+":"+digest+":"+expire)
 }
 func (s *Mock) tickets(w http.ResponseWriter, r *http.Request, c credential) {
 	var req struct{ ItemIDs []string }
@@ -174,7 +197,7 @@ func (s *Mock) tickets(w http.ResponseWriter, r *http.Request, c credential) {
 	if b == nil {
 		return
 	}
-	if b.Status != "READY" {
+	if b.Cancelled {
 		fail(w, 409, "FILE_NOT_READY")
 		return
 	}
@@ -182,15 +205,11 @@ func (s *Mock) tickets(w http.ResponseWriter, r *http.Request, c credential) {
 		fail(w, 429, "RATE_LIMITED")
 		return
 	}
-	expires := minTime(b.ExpiresAt, time.Now().Add(s.Settings.Seconds("media_ticket_ttl_seconds"))).UTC().Truncate(time.Second)
-	epoch := strconv.FormatInt(expires.Unix(), 10)
-	if time.Until(expires) < s.Settings.Seconds("client_download_timeout_seconds")+s.Settings.Seconds("ticket_safety_margin_seconds") {
-		fail(w, 410, "BATCH_EXPIRED")
-		return
-	}
-	pool := map[string]item{}
-	for _, x := range b.Items {
-		pool[x.ID] = x
+	now := time.Now().UTC()
+	s.refreshBatch(b, now)
+	pool := map[string]*item{}
+	for i := range b.Items {
+		pool[b.Items[i].ID] = &b.Items[i]
 	}
 	out := make([]dto, 0, len(req.ItemIDs))
 	for _, id := range req.ItemIDs {
@@ -200,43 +219,80 @@ func (s *Mock) tickets(w http.ResponseWriter, r *http.Request, c credential) {
 			return
 		}
 		delete(pool, id)
-		q := url.Values{"b": {b.ID}, "s": {c.Digest}, "e": {epoch}, "t": {s.signature(b.ID, x.ObjectID, c.Digest, epoch)}}
-		out = append(out, dto{"itemId": id, "deliveryMode": "relay", "url": s.Origin + "/media/download/" + x.ObjectID + "?" + q.Encode(), "expiresAt": expires})
+		if x.Status == "EXPIRED" {
+			fail(w, 410, "MEDIA_SOURCE_EXPIRED")
+			return
+		}
+		if x.Status != "READY" {
+			fail(w, 409, "FILE_NOT_READY")
+			return
+		}
+		expires := x.AvailableUntil
+		if x.Mode == "relay" {
+			expires = minTime(expires, now.Add(s.Settings.Seconds("media_ticket_ttl_seconds")))
+		}
+		expires = expires.UTC().Truncate(time.Second)
+		if expires.Sub(now) < s.downloadBudget() {
+			if x.AvailableUntil.Sub(now) < s.downloadBudget()+time.Second {
+				x.Status = "EXPIRED"
+				b.aggregate()
+			}
+			fail(w, 410, "MEDIA_SOURCE_EXPIRED")
+			return
+		}
+		out = append(out, dto{"itemId": id, "deliveryMode": x.Mode, "url": s.mediaURL(x.Mode, b.ID, x.ObjectID, c.Digest, expires), "expiresAt": expires})
 	}
 	ok(w, 200, dto{"tickets": out})
 }
-func (s *Mock) download(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	bid, session, epoch, sig := q.Get("b"), q.Get("s"), q.Get("e"), q.Get("t")
-	oid := r.PathValue("mediaObjectId")
-	n, e := strconv.ParseInt(epoch, 10, 64)
-	if e != nil || time.Now().Unix() >= n || len(bid) > 64 || len(session) != 64 || len(oid) > 64 || !hmac.Equal([]byte(sig), []byte(s.signature(bid, oid, session, epoch))) {
-		fail(w, 403, "ACCESS_DENIED")
-		return
+func (s *Mock) mediaURL(mode, bid, oid, digest string, expires time.Time) string {
+	path := "download"
+	if mode != "relay" {
+		path = "mock-source/" + mode
 	}
-	uid, err := s.Sessions.User(r.Context(), session)
-	if err != nil {
-		fail(w, 403, "ACCESS_DENIED")
-		return
-	}
-	s.mu.Lock()
-	kind := ""
-	b := s.batches[bid]
-	if b != nil && b.User == uid && b.Status == "READY" && time.Now().Before(b.ExpiresAt) {
-		for _, i := range b.Items {
-			if i.ObjectID == oid {
-				kind = i.Asset.Kind
-				break
+	epoch := strconv.FormatInt(expires.Unix(), 10)
+	q := url.Values{"b": {bid}, "s": {digest}, "e": {epoch}, "t": {s.signature(mode, bid, oid, digest, epoch)}}
+	return s.Origin + "/media/" + path + "/" + oid + "?" + q.Encode()
+}
+func (s *Mock) download(mode string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		bid, session, epoch, sig := q.Get("b"), q.Get("s"), q.Get("e"), q.Get("t")
+		oid := r.PathValue("mediaObjectId")
+		n, e := strconv.ParseInt(epoch, 10, 64)
+		if e != nil || time.Now().Unix() >= n || len(bid) > 64 || len(session) != 64 || len(oid) > 64 || !hmac.Equal([]byte(sig), []byte(s.signature(mode, bid, oid, session, epoch))) {
+			fail(w, 403, "ACCESS_DENIED")
+			return
+		}
+		uid, err := s.Sessions.User(r.Context(), session)
+		if err != nil {
+			fail(w, 403, "ACCESS_DENIED")
+			return
+		}
+		s.mu.Lock()
+		kind := ""
+		b := s.batches[bid]
+		if b != nil && b.User == uid && !b.Cancelled && time.Now().Before(b.ExpiresAt) {
+			for _, i := range b.Items {
+				valid := (i.Status == "READY" && mode == i.Mode) || (mode == "copy" && i.Status == "FAILED" && i.CopyAvailable)
+				if i.ObjectID == oid && valid && time.Now().Before(i.AvailableUntil) {
+					kind = i.Asset.Kind
+					break
+				}
 			}
 		}
+		s.mu.Unlock()
+		if kind == "" {
+			fail(w, 404, "RESOURCE_NOT_FOUND")
+			return
+		}
+		// The direct fixtures simulate an upstream that refuses the mini-program download.
+		if mode == "direct" {
+			fail(w, 403, "ACCESS_DENIED")
+			return
+		}
+		mime, data := fixture.File(kind)
+		w.Header().Set("Content-Type", mime)
+		w.Header().Set("Cache-Control", "no-store")
+		http.ServeContent(w, r, "sample", time.Time{}, bytes.NewReader(data))
 	}
-	s.mu.Unlock()
-	if kind == "" {
-		fail(w, 404, "RESOURCE_NOT_FOUND")
-		return
-	}
-	mime, data := fixture.File(kind)
-	w.Header().Set("Content-Type", mime)
-	w.Header().Set("Cache-Control", "no-store")
-	http.ServeContent(w, r, "sample", time.Time{}, bytes.NewReader(data))
 }

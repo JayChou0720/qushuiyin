@@ -23,6 +23,15 @@
   "https://www.douyin.com/video/10003": {
     "failure": true
   },
+  "https://www.douyin.com/video/10004": {
+    "info": { "video_url": "https://media.example.test/sample.mp4", "title": "准备超时演练" }
+  },
+  "https://www.douyin.com/video/10005": {
+    "info": { "video_url": "https://media.example.test/sample.mp4", "title": "直连回退演练" }
+  },
+  "https://www.douyin.com/video/10006": {
+    "info": { "video_url": "https://media.example.test/sample.mp4", "title": "复制链接演练" }
+  },
   "https://www.xiaohongshu.com/explore/10001": {
     "info": {
       "video_url": "https://media.example.test/sample.mp4",

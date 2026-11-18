@@ -48,7 +48,7 @@ type Mock struct {
 	rates          map[string]meter
 }
 type meter struct {
-	Begin time.Time
+	Until time.Time
 	Count int64
 }
 type idem struct {
@@ -71,24 +71,36 @@ const privacyVersion = "2026-09-v1"
 var messages = map[string]string{"OK": "操作成功", "INPUT_EMPTY": "请粘贴作品分享链接", "INPUT_TOO_LONG": "内容过多，请只粘贴一个作品", "TOO_MANY_LINKS": "链接太多，请只粘贴一个作品", "MULTIPLE_LINKS": "检测到多个链接，请选择一个", "NO_LINK_FOUND": "未找到作品分享链接", "LINK_INVALID": "链接无效，请检查后重试", "LINK_NOT_ALLOWED": "链接无效或暂不支持该地址", "PLATFORM_UNSUPPORTED": "暂不支持这个平台", "PLATFORM_MAINTENANCE": "该平台正在维护，请稍后再试", "CONTENT_TYPE_UNSUPPORTED": "暂不支持该内容类型", "UPSTREAM_UNAVAILABLE": "作品无法访问，可能已删除或限制访问", "UPSTREAM_INVALID_RESPONSE": "没有取得可用的媒体资源", "TOO_MANY_ASSETS": "作品资源过多", "PARSE_TIMEOUT": "解析超时，请重试", "AUTH_REQUIRED": "请先登录", "SESSION_EXPIRED": "使用状态已过期，请重试", "RESOURCE_NOT_FOUND": "资源不存在", "RESULT_EXPIRED": "解析结果已过期，请重新解析", "JOB_EXPIRED": "解析任务已过期", "BATCH_EXPIRED": "保存操作已过期", "BAD_REQUEST": "请求参数有误", "PRIVACY_VERSION_REQUIRED": "请先查看最新隐私说明", "IDEMPOTENCY_CONFLICT": "该操作已使用不同参数提交", "FILE_NOT_READY": "文件尚未准备好", "FALLBACK_NOT_ALLOWED": "当前下载方式不支持回退", "RATE_LIMITED": "操作较频繁，请稍后再试", "SERVICE_BUSY": "服务繁忙，请稍后再试", "INTERNAL_ERROR": "服务暂不可用"}
 
 func issue(code string) dto {
-	return dto{"code": code, "message": messages[code], "retryable": code == "UPSTREAM_UNAVAILABLE" || code == "PARSE_TIMEOUT"}
+	return dto{"code": code, "message": messageFor(code), "retryable": code == "UPSTREAM_UNAVAILABLE" || code == "PARSE_TIMEOUT" || code == "PREPARE_TIMEOUT" || code == "MEDIA_SOURCE_EXPIRED"}
+}
+func messageFor(code string) string {
+	switch code {
+	case "PREPARE_TIMEOUT":
+		return "文件准备超时"
+	case "MEDIA_SOURCE_EXPIRED":
+		return "作品下载地址已失效"
+	case "RETRY_NOT_ALLOWED":
+		return "此项当前不能重新准备"
+	case "RETRY_LIMIT_REACHED":
+		return "本次重试次数已用完，请重新解析"
+	case "DIRECT_DOWNLOAD_UNAVAILABLE":
+		return "暂时无法直接保存，可复制链接到浏览器下载"
+	case "ACCESS_DENIED":
+		return "当前无法执行此操作"
+	case "ADMIN_LOGIN_FAILED":
+		return "无法登录，请检查账号和密码或稍后重试"
+	}
+	if msg := messages[code]; msg != "" {
+		return msg
+	}
+	return messages["INTERNAL_ERROR"]
 }
 func send(w http.ResponseWriter, status int, code string, data, details any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	rid := auth.ID()
 	w.Header().Set("X-Request-Id", rid)
-	msg := messages[code]
-	switch code {
-	case "ACCESS_DENIED":
-		msg = "当前无法执行此操作"
-	case "ADMIN_LOGIN_FAILED":
-		msg = "无法登录，请检查账号和密码或稍后重试"
-	}
-	if msg == "" {
-		msg = messages["INTERNAL_ERROR"]
-	}
-	res := envelope{Code: code, Message: msg, RequestID: rid, Data: data}
+	res := envelope{Code: code, Message: messageFor(code), RequestID: rid, Data: data}
 	if code != "OK" {
 		res.Error = dto{"retryable": status == 429 || status >= 500, "details": details}
 	}
@@ -134,12 +146,15 @@ func (s *Mock) authorized(next authed) http.HandlerFunc {
 	}
 }
 func (s *Mock) minute(key string, cap int64) bool {
+	return s.rate(key, cap, time.Minute)
+}
+func (s *Mock) rate(key string, cap int64, period time.Duration) bool {
 	now := time.Now()
 	m := s.rates[key]
-	if m.Begin.IsZero() || now.Sub(m.Begin) >= time.Minute {
+	if !now.Before(m.Until) {
 		if len(s.rates) >= int(s.Settings.Int("memory_rate_limit_max_subjects")) {
 			for k, v := range s.rates {
-				if now.Sub(v.Begin) >= time.Minute {
+				if !now.Before(v.Until) {
 					delete(s.rates, k)
 				}
 			}
@@ -147,7 +162,7 @@ func (s *Mock) minute(key string, cap int64) bool {
 				return false
 			}
 		}
-		m = meter{Begin: now}
+		m = meter{Until: now.Add(period)}
 	}
 	if m.Count >= cap {
 		return false
@@ -233,7 +248,12 @@ func (s *Mock) Handler() http.Handler {
 	m.HandleFunc("GET /v1/save-batches/{batchId}", s.authorized(s.batchStatus))
 	m.HandleFunc("DELETE /v1/save-batches/{batchId}", s.authorized(s.batchStatus))
 	m.HandleFunc("POST /v1/save-batches/{batchId}/tickets", s.authorized(s.tickets))
-	m.HandleFunc("GET /media/download/{mediaObjectId}", s.download)
+	m.HandleFunc("POST /v1/save-batches/{batchId}/retry", s.authorized(s.retryBatch))
+	m.HandleFunc("POST /v1/save-batches/{batchId}/items/{itemId}/fallback", s.authorized(s.fallbackItem))
+	m.HandleFunc("POST /v1/save-batches/{batchId}/items/{itemId}/copy-link", s.authorized(s.copyLink))
+	m.HandleFunc("GET /media/download/{mediaObjectId}", s.download("relay"))
+	m.HandleFunc("GET /media/mock-source/direct/{mediaObjectId}", s.download("direct"))
+	m.HandleFunc("GET /media/mock-source/copy/{mediaObjectId}", s.download("copy"))
 	m.HandleFunc("GET /media/preview/{previewId}", s.previewMedia("preview"))
 	m.HandleFunc("GET /media/thumbnail/{previewId}", s.previewMedia("thumbnail"))
 	m.HandleFunc("GET /media/image/{previewId}", s.previewMedia("thumbnail"))

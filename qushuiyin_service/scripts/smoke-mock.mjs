@@ -26,7 +26,7 @@ const createSession = () => request('POST','/v1/sessions/wechat',{data:{code:'de
 const { token } = await createSession()
 const other = (await createSession()).token
 const input = shareText => ({ shareText, selectedUrl: null, source: 'manual', forceRefresh: false, flowId: randomUUID() })
-const create = (data, key = randomUUID()) => request('POST','/v1/parse-jobs',{token,data,key,expect:202})
+const create = (data, key = randomUUID(), owner = token) => request('POST','/v1/parse-jobs',{token:owner,data,key,expect:202})
 const jobPath = j => '/v1/parse-jobs/' + j.jobId
 const resultPath = j => '/v1/results/' + j.resultId
 
@@ -67,11 +67,11 @@ assert.equal((await fetch(preview.url,{headers:{Range:'bytes=0-0,4-8'}})).status
 const invalidPreview=new URL(preview.url);invalidPreview.searchParams.set('t','invalid')
 assert.equal((await fetch(invalidPreview)).status,403)
 
-const makeBatch=async (res,ids)=> {
+const makeBatch=async (res,ids,owner = token)=> {
   const data={resultId:res.resultId,assetIds:ids,clientActionId:randomUUID(),flowId:randomUUID()}
   const k=randomUUID()
-  const b=await request('POST','/v1/save-batches',{token,data,key:k,expect:202})
-  assert.equal((await request('POST','/v1/save-batches',{token,data,key:k,expect:202})).batchId,b.batchId)
+  const b=await request('POST','/v1/save-batches',{token:owner,data,key:k,expect:202})
+  assert.equal((await request('POST','/v1/save-batches',{token:owner,data,key:k,expect:202})).batchId,b.batchId)
   return '/v1/save-batches/'+b.batchId
 }
 const batchPath=await makeBatch(result,[result.assets[0].assetId])
@@ -114,8 +114,71 @@ assert.equal(bad.status,'FAILED')
 assert.equal(bad.error.code,'UPSTREAM_UNAVAILABLE')
 const cancelled=await request('DELETE',jobPath(await create(input(video))),{token})
 assert.equal(cancelled.status,'CANCELLED')
+
+async function checkRecovery(token) {
+const recoveryCase = async fixtureId => {
+  const job = await request('GET',jobPath(await create(input('https://www.douyin.com/video/'+fixtureId),randomUUID(),token)),{token})
+  const res = await request('GET',resultPath(job),{token})
+  const path = await makeBatch(res,[res.assets[0].assetId],token)
+  return { path, item:(await request('GET',path,{token})).items[0] }
+}
+const retry = await recoveryCase('10004')
+assert.equal(retry.item.prepareStatus,'FAILED')
+assert.equal(retry.item.error.code,'PREPARE_TIMEOUT')
+const retryData = {itemIds:[retry.item.itemId]}
+await request('POST',retry.path+'/retry',{data:retryData,expect:401,code:'AUTH_REQUIRED'})
+await request('POST',retry.path+'/retry',{data:retryData,token:other,expect:404,code:'RESOURCE_NOT_FOUND'})
+await request('POST',retry.path+'/retry',{data:{itemIds:[retry.item.itemId,retry.item.itemId]},token,key:randomUUID(),expect:400,code:'BAD_REQUEST'})
+const retryKey = randomUUID()
+await request('POST',retry.path+'/retry',{data:retryData,token,key:retryKey,expect:202})
+assert.equal((await request('GET',retry.path,{token})).items[0].attempt,2)
+await request('POST',retry.path+'/retry',{data:retryData,token,key:retryKey,expect:202})
+const recovered = (await request('GET',retry.path,{token})).items[0]
+assert.equal(recovered.prepareStatus,'READY')
+assert.equal(recovered.attempt,2)
+await request('POST',retry.path+'/retry',{data:retryData,token,key:randomUUID(),expect:409,code:'FILE_NOT_READY'})
+
+const direct = await recoveryCase('10005')
+const directPath = direct.path+'/items/'+direct.item.itemId
+assert.equal(direct.item.deliveryMode,'direct')
+const {tickets:[firstDirect]}=await request('POST',direct.path+'/tickets',{token,data:{itemIds:[direct.item.itemId]}})
+assert.equal((await fetch(firstDirect.url)).status,403)
+const fallbackData={reason:'DIRECT_DOWNLOAD_REJECTED'}
+await request('POST',directPath+'/fallback',{data:fallbackData,expect:401,code:'AUTH_REQUIRED'})
+await request('POST',directPath+'/fallback',{token:other,data:fallbackData,key:randomUUID(),expect:404,code:'RESOURCE_NOT_FOUND'})
+await request('POST',directPath+'/fallback',{token,data:{reason:'invalid'},key:randomUUID(),expect:400,code:'BAD_REQUEST'})
+const fallbackKey=randomUUID()
+await request('POST',directPath+'/fallback',{token,data:fallbackData,key:fallbackKey,expect:202})
+await request('POST',directPath+'/fallback',{token,data:{reason:'DIRECT_CONTENT_INVALID'},key:fallbackKey,expect:409,code:'IDEMPOTENCY_CONFLICT'})
+const relay=(await request('GET',direct.path,{token})).items[0]
+assert.equal(relay.deliveryMode,'relay')
+assert.equal(relay.attempt,2)
+await request('POST',directPath+'/fallback',{token,data:fallbackData,key:fallbackKey,expect:202})
+await request('POST',directPath+'/fallback',{token,data:fallbackData,key:randomUUID(),expect:409,code:'FALLBACK_NOT_ALLOWED'})
+assert.equal((await fetch(firstDirect.url)).status,404)
+const relayed=await request('POST',direct.path+'/tickets',{token,data:{itemIds:[relay.itemId]}})
+assert.equal((await fetch(relayed.tickets[0].url)).status,200)
+
+const copy = await recoveryCase('10006')
+const copyPath=copy.path+'/items/'+copy.item.itemId
+await request('POST',copyPath+'/copy-link',{token,expect:409,code:'FILE_NOT_READY'})
+await request('POST',copyPath+'/fallback',{token,data:fallbackData,key:randomUUID(),expect:202})
+const failedItem=(await request('GET',copy.path,{token})).items[0]
+assert.equal(failedItem.prepareStatus,'FAILED')
+assert.equal(failedItem.copyLinkAvailable,true)
+await request('POST',copyPath+'/copy-link',{expect:401,code:'AUTH_REQUIRED'})
+await request('POST',copyPath+'/copy-link',{token:other,expect:404,code:'RESOURCE_NOT_FOUND'})
+const copied=await request('POST',copyPath+'/copy-link',{token})
+assert.equal(new URL(copied.url).origin,base)
+assert.equal((await fetch(copied.url)).status,200)
+await request('DELETE',copy.path,{token})
+assert.equal((await fetch(copied.url)).status,404)
+await request('DELETE','/v1/sessions/current',{token})
+}
+await checkRecovery((await createSession()).token)
+
 await request('DELETE','/v1/sessions/current',{token})
 assert.equal((await fetch(picTickets.tickets[0].url)).status,403)
 assert.equal((await fetch(preview.url)).status,403)
 await request('GET',jobPath(first),{token,expect:401,code:'SESSION_EXPIRED'})
-console.log('Mock API smoke passed: video, gallery, previews, error, owner isolation, admin guards, idempotency and ticket revocation.')
+console.log('Mock API smoke passed: video, gallery, previews, retry, fallback, copy link, owner isolation, admin guards, idempotency and ticket revocation.')

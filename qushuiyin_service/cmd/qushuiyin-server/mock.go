@@ -86,7 +86,7 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 		return errors.New("invalid parser fixtures")
 	}
 	mock := httpapi.Mock{Settings: settings, Sessions: auth.Store{DB: db, Key: key, TTL: settings.Seconds("session_ttl_seconds")}, TicketKey: ticketKey, Adapter: parser, Platforms: platforms, Origin: origin, DevLogin: env == "local" && getenv("WECHAT_DEV_LOGIN") == "true"}
-	if err := settings.Validate("admin_session_ttl_seconds", "admin_login_max_failures", "admin_lockout_seconds", "preview_max_bytes"); err != nil {
+	if err := settings.Validate("admin_session_ttl_seconds", "admin_login_max_failures", "admin_lockout_seconds", "preview_max_bytes", "media_cache_ttl_seconds", "direct_url_assumed_ttl_seconds", "media_prepare_max_attempts_per_item", "user_copy_link_per_day"); err != nil {
 		return err
 	}
 	mock.Admin = auth.AdminStore{DB: db, Key: key, TTL: settings.Seconds("admin_session_ttl_seconds"), MaxFailures: settings.Int("admin_login_max_failures"), Lockout: settings.Seconds("admin_lockout_seconds")}

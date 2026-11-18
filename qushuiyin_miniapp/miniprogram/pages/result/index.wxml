@@ -1,20 +1,44 @@
 <view class="screen stack">
   <view class="row spread"><text class="title">解析结果</text><text class="badge">本地演练</text></view>
-  <text wx:if="{{error}}" class="error" role="alert">{{error}}</text>
+  <text wx:if="{{error && !result}}" class="error" role="alert">{{error}}</text>
   <text wx:if="{{!error && !result}}" class="muted">正在读取结果</text>
   <button wx:if="{{error && !result}}" class="action" bindtap="load">重试</button>
   <block wx:if="{{result}}">
     <view class="surface stack">
       <text class="section-title">{{result.title || '未命名作品'}}</text>
       <text class="muted">{{result.mediaType === 'video' ? '视频' : '图集'}} · {{result.assetCount}} 项</text>
-      <checkbox-group wx:if="{{result.mediaType === 'image'}}">
-        <label wx:for="{{result.assets}}" wx:key="assetId" class="asset-option" bindtap="toggle" data-asset="{{item.assetId}}"><checkbox checked="{{selected[item.assetId]}}" disabled="{{busy}}" />图片 {{item.order}}</label>
-      </checkbox-group>
+      <view wx:if="{{result.mediaType === 'video' && result.capabilities.canPreview}}" class="stack">
+        <view wx:if="{{previewKind !== 'video'}}" class="video-frame" id="thumb-{{result.cover.assetId}}">
+          <image wx:if="{{result.cover && thumbnails[result.cover.assetId]}}" class="video-poster" src="{{thumbnails[result.cover.assetId]}}" mode="aspectFit" aria-hidden="true" />
+          <button class="action primary play" bindtap="play" hover-class="button-press"><image class="icon" src="/icons/play.svg" aria-hidden="true" />播放视频</button>
+        </view>
+      </view>
+      <view wx:if="{{previewKind}}" class="stack preview-panel">
+        <view class="row spread"><text class="section-title">{{previewKind === 'video' ? '视频预览' : '图片 ' + previewOrder}}</text><button class="action quiet" bindtap="closePreview" hover-class="button-press">关闭预览</button></view>
+        <view class="video-frame" wx:if="{{previewKind === 'video' && !previewError}}">
+          <video wx:if="{{previewURL}}" class="preview-video" src="{{previewURL}}" autoplay object-fit="contain" binderror="previewFailed" />
+          <text wx:elif="{{previewBusy}}" class="frame-message" aria-live="polite">正在加载预览</text>
+        </view>
+        <image wx:if="{{previewKind === 'image' && previewURL}}" class="preview-image" src="{{previewURL}}" mode="widthFix" binderror="previewFailed" aria-label="图片 {{previewOrder}}" />
+        <text wx:if="{{previewKind === 'image' && previewBusy}}" class="muted" aria-live="polite">正在加载预览</text>
+        <text wx:if="{{previewError}}" class="error" role="alert">{{previewError}}</text>
+      </view>
+      <view wx:if="{{result.mediaType === 'image'}}" class="gallery">
+        <view wx:for="{{result.assets}}" wx:key="assetId" class="asset-option">
+          <label class="asset-check" bindtap="toggle" data-asset="{{item.assetId}}"><checkbox checked="{{selected[item.assetId]}}" disabled="{{busy}}" />图片 {{item.order}}</label>
+          <button wx:if="{{result.capabilities.canPreview}}" class="action quiet thumb-button" id="thumb-{{item.assetId}}" bindtap="viewImage" data-asset="{{item.assetId}}" hover-class="button-press" aria-label="预览图片 {{item.order}}"><image wx:if="{{thumbnails[item.assetId]}}" class="thumbnail" src="{{thumbnails[item.assetId]}}" mode="aspectFill" lazy-load aria-hidden="true" /><text>预览</text></button>
+        </view>
+      </view>
       <view wx:if="{{result.description}}" class="stack"><text class="caption">{{result.description}}</text><button class="action" bindtap="copy" hover-class="button-press">复制文案</button></view>
     </view>
-    <text wx:if="{{status}}" class="muted" aria-live="polite">{{status}}</text>
-    <button class="action primary" disabled="{{busy || !count}}" loading="{{busy}}" bindtap="save" hover-class="button-press"><image class="icon" src="/icons/download.svg" />{{result.mediaType === 'video' ? '演练保存视频' : '演练保存 ' + count + ' 张图片'}}</button>
+    <view class="row save-actions">
+      <button class="action primary" disabled="{{busy || !count}}" loading="{{busy}}" bindtap="save" hover-class="button-press"><image class="icon" src="/icons/download.svg" />{{result.mediaType === 'video' ? '演练保存视频' : '演练保存 ' + count + ' 张图片'}}</button>
+      <button wx:if="{{busy}}" class="action quiet" bindtap="cancel">取消下载</button>
+    </view>
     <button wx:if="{{result.cover}}" class="action" disabled="{{busy}}" bindtap="saveCover" hover-class="button-press">演练保存封面</button>
-    <button wx:if="{{busy}}" class="action quiet" bindtap="cancel">取消下载</button>
+    <text wx:if="{{error}}" class="error" role="alert">{{error}}</text>
+    <text wx:elif="{{status}}" class="muted" aria-live="polite">{{status}}</text>
+    <button wx:if="{{retryAvailable && !busy}}" class="action" bindtap="retrySave" hover-class="button-press">重试未完成项</button>
+    <button wx:for="{{copyItems}}" wx:key="itemId" class="action" bindtap="copyLink" data-item="{{item.itemId}}" hover-class="button-press">复制{{result.mediaType === 'image' ? '图片 ' + item.order + ' 的' : ''}}下载链接</button>
   </block>
 </view>
