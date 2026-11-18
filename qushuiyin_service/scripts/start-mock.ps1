@@ -1,6 +1,7 @@
 param(
     [switch]$Background,
-    [int]$DatabasePort = 33316
+    [ValidateRange(1, 65535)][int]$DatabasePort = 33316,
+    [ValidateRange(1, 65535)][int]$ApiPort = 18080
 )
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
@@ -34,7 +35,8 @@ function Invoke-ServerCommand([string[]]$CommandArgs) {
 }
 
 New-Item -ItemType Directory -Path $runtime -Force | Out-Null
-if (Test-Port 18080) { throw 'Port 18080 is occupied. Stop the existing mock API before starting another.' }
+if ($ApiPort -eq $DatabasePort) { throw 'API and database need different ports.' }
+if (Test-Port $ApiPort) { throw "Port $ApiPort is occupied. Use -ApiPort to choose a different port." }
 if (Test-Path -LiteralPath $state) {
     $settings = Get-Content -Raw -LiteralPath $state | ConvertFrom-Json
     if ($settings.DatabasePort -ne $DatabasePort) { throw 'The existing mock database uses another port.' }
@@ -66,12 +68,12 @@ if (-not (Test-Port $DatabasePort)) {
 $env:APP_ENV = 'local'
 $env:PARSE_MODE = 'mock'
 $env:WECHAT_DEV_LOGIN = 'true'
-$env:HTTP_ADDR = '127.0.0.1:18080'
-$env:MOCK_MEDIA_ORIGIN = 'http://127.0.0.1:18080'
+$env:HTTP_ADDR = "127.0.0.1:$ApiPort"
+$env:MOCK_MEDIA_ORIGIN = "http://$($env:HTTP_ADDR)"
 $env:MYSQL_DSN = "qsy_mock:$($settings.Password)@tcp(127.0.0.1:$DatabasePort)/qushuiyin_dev?timeout=5s&readTimeout=5s&writeTimeout=5s"
 $env:HMAC_KEY = $settings.SessionKey
 $env:TICKET_SIGNING_KEY = $settings.TicketKey
-$script:exe = Join-Path $repo 'bin/qushuiyin-server.exe'
+$script:exe = Join-Path $runtime "qushuiyin-server-$ApiPort.exe"
 Push-Location $repo
 try {
     & $goExe build -o $script:exe ./cmd/qushuiyin-server
@@ -80,10 +82,10 @@ try {
     if (Test-Path -LiteralPath $init) { Remove-Item -LiteralPath $init }
     Invoke-ServerCommand @('dev','seed')
     if ($Background) {
-        $server = Start-Process -FilePath $script:exe -ArgumentList 'serve' -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $runtime 'server.log') -RedirectStandardError (Join-Path $runtime 'server-error.log')
-        for ($i = 0; $i -lt 40 -and -not (Test-Port 18080); $i++) { if ($server.HasExited) { throw 'Mock server exited; see the local error log.' }; Start-Sleep -Milliseconds 200 }
-        if (-not (Test-Port 18080)) { throw 'Mock server did not start.' }
-        Write-Output 'Mock API: http://127.0.0.1:18080/v1/config'
+        $server = Start-Process -FilePath $script:exe -ArgumentList 'serve' -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $runtime "server-$ApiPort.log") -RedirectStandardError (Join-Path $runtime "server-$ApiPort-error.log")
+        for ($i = 0; $i -lt 40 -and -not (Test-Port $ApiPort); $i++) { if ($server.HasExited) { throw 'Mock server exited; see the local error log.' }; Start-Sleep -Milliseconds 200 }
+        if (-not (Test-Port $ApiPort)) { throw 'Mock server did not start.' }
+        Write-Output "Mock API: $($env:MOCK_MEDIA_ORIGIN)/v1/config"
     } else {
         Invoke-ServerCommand @('serve')
     }

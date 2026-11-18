@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 
-const base = 'http://127.0.0.1:18080'
+const port = Number(process.argv[2] ?? 18080)
+assert.ok(Number.isInteger(port) && port > 0 && port < 65536, 'Expected a loopback API port')
+const base = 'http://127.0.0.1:' + port
 const video = 'https://www.douyin.com/video/10001'
 const gallery = 'https://www.xiaohongshu.com/explore/10002'
 const failed = 'https://www.douyin.com/video/10003'
-const request = async (method, path, { data, token, key, expect = 200, code = 'OK' } = {}) => {
+const request = async (method, path, { data, token, key, origin, expect = 200, code = 'OK' } = {}) => {
   const headers = { 'Content-Type': 'application/json' }
   if (token) headers.Authorization = 'Bearer ' + token
   if (key) headers['Idempotency-Key'] = key
+  if (origin) headers.Origin = origin
   const response = await fetch(base + path, { method, headers, body: data ? JSON.stringify(data) : undefined, signal: AbortSignal.timeout(8000) })
   assert.equal(response.status, expect, method + ' ' + path)
   const payload = await response.json()
@@ -45,6 +48,25 @@ assert.equal(result.assets[0].previewUrl,null)
 assert.ok(!JSON.stringify(result).includes('media.example.test'))
 await request('GET',resultPath(read),{token:other,expect:404,code:'RESOURCE_NOT_FOUND'})
 
+await request('GET','/admin/v1/me',{token,expect:401,code:'AUTH_REQUIRED'})
+await request('POST','/admin/v1/sessions',{data:{username:'unknown-smoke',password:randomUUID()},origin:'https://wrong.invalid',expect:403,code:'ACCESS_DENIED'})
+await request('POST','/admin/v1/sessions',{data:{username:'unknown-smoke',password:randomUUID()},origin:base,expect:401,code:'ADMIN_LOGIN_FAILED'})
+
+const previewPath = resultPath(read) + '/preview-tickets'
+const previewRequest = {assetIds:[result.assets[0].assetId]}
+await request('POST',previewPath,{data:previewRequest,expect:401,code:'AUTH_REQUIRED'})
+await request('POST',previewPath,{data:previewRequest,token:other,expect:404,code:'RESOURCE_NOT_FOUND'})
+await request('POST',previewPath,{data:{assetIds:[]},token,expect:400,code:'BAD_REQUEST'})
+const {previews:[preview]}=await request('POST',previewPath,{token,data:previewRequest})
+assert.equal(new URL(preview.url).origin,base)
+assert.equal(preview.mode,'relay')
+const portion=await fetch(preview.url,{headers:{Range:'bytes=0-11'}})
+assert.equal(portion.status,206)
+assert.equal(Buffer.from(await portion.arrayBuffer()).subarray(4,8).toString(),'ftyp')
+assert.equal((await fetch(preview.url,{headers:{Range:'bytes=0-0,4-8'}})).status,416)
+const invalidPreview=new URL(preview.url);invalidPreview.searchParams.set('t','invalid')
+assert.equal((await fetch(invalidPreview)).status,403)
+
 const makeBatch=async (res,ids)=> {
   const data={resultId:res.resultId,assetIds:ids,clientActionId:randomUUID(),flowId:randomUUID()}
   const k=randomUUID()
@@ -74,6 +96,11 @@ assert.equal((await fetch(ticket.url)).status,404)
 const pictureJob=await request('GET',jobPath(await create({...input(video+' '+gallery),selectedUrl:gallery})),{token})
 const pictures=await request('GET',resultPath(pictureJob),{token})
 assert.equal(pictures.mediaType,'image')
+const picturePreviews=await request('POST',resultPath(pictureJob)+'/preview-tickets',{token,data:{assetIds:pictures.assets.map(a=>a.assetId)}})
+assert.equal(picturePreviews.previews.length,2)
+const thumbnail=await fetch(picturePreviews.previews[0].url)
+assert.equal(thumbnail.headers.get('content-type'),'image/png')
+assert.equal(Buffer.from(await thumbnail.arrayBuffer()).subarray(1,4).toString(),'PNG')
 const images=await makeBatch(pictures,pictures.assets.map(a=>a.assetId).reverse())
 const imageBatch=await request('GET',images,{token})
 assert.deepEqual(imageBatch.items.map(a=>a.order),[1,2])
@@ -89,5 +116,6 @@ const cancelled=await request('DELETE',jobPath(await create(input(video))),{toke
 assert.equal(cancelled.status,'CANCELLED')
 await request('DELETE','/v1/sessions/current',{token})
 assert.equal((await fetch(picTickets.tickets[0].url)).status,403)
+assert.equal((await fetch(preview.url)).status,403)
 await request('GET',jobPath(first),{token,expect:401,code:'SESSION_EXPIRED'})
-console.log('Mock API smoke passed: video, gallery, error, owner isolation, idempotency, ticket rejection and session revocation.')
+console.log('Mock API smoke passed: video, gallery, previews, error, owner isolation, admin guards, idempotency and ticket revocation.')

@@ -28,19 +28,24 @@ type Platform struct {
 	Text   bool   `json:"textEnabled"`
 }
 type Mock struct {
-	Settings  config.Values
-	Sessions  auth.Store
-	TicketKey []byte
-	Adapter   parse.Adapter
-	Platforms []Platform
-	Origin    string
-	DevLogin  bool
-	mu        sync.Mutex
-	jobs      map[string]*job
-	results   map[string]*result
-	batches   map[string]*batch
-	keys      map[string]idem
-	rates     map[string]meter
+	Admin          auth.AdminStore
+	AdminHost      string
+	AdminOrigins   map[string]bool
+	adminHashSlots chan struct{}
+	Settings       config.Values
+	Sessions       auth.Store
+	TicketKey      []byte
+	Adapter        parse.Adapter
+	Platforms      []Platform
+	Origin         string
+	DevLogin       bool
+	mu             sync.Mutex
+	jobs           map[string]*job
+	results        map[string]*result
+	batches        map[string]*batch
+	previews       map[string]*preview
+	keys           map[string]idem
+	rates          map[string]meter
 }
 type meter struct {
 	Begin time.Time
@@ -74,6 +79,12 @@ func send(w http.ResponseWriter, status int, code string, data, details any) {
 	rid := auth.ID()
 	w.Header().Set("X-Request-Id", rid)
 	msg := messages[code]
+	switch code {
+	case "ACCESS_DENIED":
+		msg = "当前无法执行此操作"
+	case "ADMIN_LOGIN_FAILED":
+		msg = "无法登录，请检查账号和密码或稍后重试"
+	}
 	if msg == "" {
 		msg = messages["INTERNAL_ERROR"]
 	}
@@ -197,9 +208,13 @@ func (s *Mock) Handler() http.Handler {
 	s.jobs = map[string]*job{}
 	s.results = map[string]*result{}
 	s.batches = map[string]*batch{}
+	s.previews = map[string]*preview{}
 	s.keys = map[string]idem{}
 	s.rates = map[string]meter{}
 	m := http.NewServeMux()
+	if s.Admin.DB != nil && s.AdminHost != "" {
+		s.adminRoutes(m)
+	}
 	m.HandleFunc("GET /v1/config", s.publicConfig)
 	m.HandleFunc("POST /v1/sessions/wechat", s.login)
 	m.HandleFunc("DELETE /v1/sessions/current", s.authorized(func(w http.ResponseWriter, r *http.Request, c credential) {
@@ -213,15 +228,24 @@ func (s *Mock) Handler() http.Handler {
 	m.HandleFunc("GET /v1/parse-jobs/{jobId}", s.authorized(s.jobStatus))
 	m.HandleFunc("DELETE /v1/parse-jobs/{jobId}", s.authorized(s.jobStatus))
 	m.HandleFunc("GET /v1/results/{resultId}", s.authorized(s.resultData))
+	m.HandleFunc("POST /v1/results/{resultId}/preview-tickets", s.authorized(s.previewTickets))
 	m.HandleFunc("POST /v1/save-batches", s.authorized(s.createBatch))
 	m.HandleFunc("GET /v1/save-batches/{batchId}", s.authorized(s.batchStatus))
 	m.HandleFunc("DELETE /v1/save-batches/{batchId}", s.authorized(s.batchStatus))
 	m.HandleFunc("POST /v1/save-batches/{batchId}/tickets", s.authorized(s.tickets))
 	m.HandleFunc("GET /media/download/{mediaObjectId}", s.download)
+	m.HandleFunc("GET /media/preview/{previewId}", s.previewMedia("preview"))
+	m.HandleFunc("GET /media/thumbnail/{previewId}", s.previewMedia("thumbnail"))
+	m.HandleFunc("GET /media/image/{previewId}", s.previewMedia("thumbnail"))
 	m.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { fail(w, 404, "RESOURCE_NOT_FOUND") })
 	return m
 }
 func (s *Mock) prune(now time.Time) {
+	for k, x := range s.previews {
+		if !now.Before(x.expires) {
+			delete(s.previews, k)
+		}
+	}
 	for k, x := range s.keys {
 		if !now.Before(x.Expires) {
 			delete(s.keys, k)

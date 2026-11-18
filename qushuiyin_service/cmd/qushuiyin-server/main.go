@@ -33,6 +33,9 @@ type report struct {
 }
 
 func run(ctx context.Context, args []string, getenv func(string) string, out io.Writer) error {
+	if len(args) > 0 && args[0] == "admin" {
+		return adminCommand(ctx, args[1:], getenv, out)
+	}
 	if len(args) == 1 && args[0] == "serve" {
 		return mockCommand(ctx, "serve", getenv, out)
 	}
@@ -40,7 +43,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 		return mockCommand(ctx, "seed", getenv, out)
 	}
 	if len(args) != 2 || (args[0] != "probe" && (args[0] != "migrate" || (args[1] != "up" && args[1] != "status"))) {
-		return errors.New("usage: qushuiyin-server serve | dev seed | migrate up | migrate status | probe <share-url>")
+		return errors.New("usage: qushuiyin-server serve | dev seed | migrate up | migrate status | admin create | probe <share-url>")
 	}
 	l := config.Defaults()
 	mode := getenv("PARSE_MODE")

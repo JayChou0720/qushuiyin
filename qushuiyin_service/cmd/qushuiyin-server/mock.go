@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 
 	"qushuiyin/service/internal/auth"
 	"qushuiyin/service/internal/config"
@@ -85,6 +86,25 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 		return errors.New("invalid parser fixtures")
 	}
 	mock := httpapi.Mock{Settings: settings, Sessions: auth.Store{DB: db, Key: key, TTL: settings.Seconds("session_ttl_seconds")}, TicketKey: ticketKey, Adapter: parser, Platforms: platforms, Origin: origin, DevLogin: env == "local" && getenv("WECHAT_DEV_LOGIN") == "true"}
+	if err := settings.Validate("admin_session_ttl_seconds", "admin_login_max_failures", "admin_lockout_seconds", "preview_max_bytes"); err != nil {
+		return err
+	}
+	mock.Admin = auth.AdminStore{DB: db, Key: key, TTL: settings.Seconds("admin_session_ttl_seconds"), MaxFailures: settings.Int("admin_login_max_failures"), Lockout: settings.Seconds("admin_lockout_seconds")}
+	mock.AdminHost = getenv("ADMIN_PUBLIC_HOST")
+	if mock.AdminHost == "" {
+		mock.AdminHost = addr
+	}
+	mock.AdminOrigins = map[string]bool{origin: true}
+	for _, v := range strings.Split(getenv("ADMIN_ALLOWED_ORIGINS"), ",") {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if _, err := config.LoopbackOrigin(v); err != nil {
+			return errors.New("mock admin origins must be loopback HTTP origins")
+		}
+		mock.AdminOrigins[v] = true
+	}
 	// All requests are bounded by the job budget; only small sample files are served.
 	srv := http.Server{Addr: addr, Handler: mock.Handler(), ReadTimeout: l.Job, WriteTimeout: l.Job, IdleTimeout: settings.Seconds("config_client_cache_seconds")}
 	listener, e := net.Listen("tcp", addr)
