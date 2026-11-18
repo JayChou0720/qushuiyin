@@ -1,0 +1,5 @@
+@import "./shared.wxss";
+.feedback-list, .feedback-list-item { gap: 8px; }
+.feedback-list-item { min-height: 48px; }
+.feedback-heading { flex-wrap: wrap; }
+.feedback-summary { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }

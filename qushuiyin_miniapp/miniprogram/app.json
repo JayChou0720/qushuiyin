@@ -2,7 +2,10 @@
   "pages": [
     "pages/home/index",
     "pages/result/index",
-    "pages/help/index"
+    "pages/help/index",
+    "pages/feedback/create",
+    "pages/feedback/list",
+    "pages/feedback/detail"
   ],
   "window": {
     "navigationBarTextStyle": "black",

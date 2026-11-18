@@ -1,0 +1,7 @@
+button.feedback-button { width: 100%; min-height: 48px; }
+.feedback-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.feedback-id, .feedback-text { overflow-wrap: anywhere; word-break: break-word; }
+.feedback-text { white-space: pre-wrap; }
+.feedback-state { color: #244fbd; background: #edf3ff; border-radius: 4px; padding: 3px 8px; font-size: 13px; font-weight: 650; }
+.feedback-state.replied { color: #205345; background: #e5f2ee; }
+.feedback-state.closed { color: #45526a; background: #edf1f5; }

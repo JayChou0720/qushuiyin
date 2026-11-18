@@ -6,11 +6,17 @@ export interface Candidate { url: string; displayHost: string; platform: string 
 export interface PublicConfig {
   privacyVersion: string
   features: { mock: boolean; devLogin: boolean }
-  limits: { max_share_text_chars: number; max_image_batch_count: number; client_parse_wait_seconds: number; client_download_timeout_seconds: number; poll_interval_ms: number }
+  limits: { max_share_text_chars: number; max_image_batch_count: number; client_parse_wait_seconds: number; client_download_timeout_seconds: number; poll_interval_ms: number; feedback_min_chars: number; feedback_max_chars: number; feedback_contact_max_chars: number }
   platforms: { platform: string; status: string; videoEnabled: boolean; imageEnabled: boolean }[]
 }
 interface Session { userId: string; token: string; expiresAt: string }
-export interface Job { jobId: string; status: string; pollAfterMs: number; deadlineAt: string; resultId?: string; error?: { message: string } }
+export interface Job { jobId: string; status: string; pollAfterMs: number; deadlineAt: string; resultId?: string; error?: { message: string; traceId?: string } }
+export type FeedbackStatus = 'pending' | 'processing' | 'replied' | 'closed'
+export interface FeedbackRequest { category: string; content: string; contact?: string; traceId?: string; includeSource: boolean; sourceUrl?: string }
+export interface FeedbackCreated { feedbackId: string; status: FeedbackStatus; createdAt: string }
+export interface FeedbackSummary { id: string; category: string; summary: string; status: FeedbackStatus; createdAt: string; updatedAt: string }
+export interface FeedbackDetail extends Omit<FeedbackSummary, 'summary'> { content: string; contact: string | null; reply: string | null; repliedAt: string | null }
+interface FeedbackPage { items: FeedbackSummary[]; nextCursor: string | null; hasMore: boolean }
 export interface Asset { assetId: string; type: string; order: number }
 export interface Result { resultId: string; platform: string; mediaType: string; title: string | null; description: string | null; assets: Asset[]; assetCount: number; cover: Asset | null; capabilities: { canPreview: boolean } }
 type PreviewKind = 'video' | 'thumbnail' | 'image'
@@ -50,6 +56,7 @@ export async function loadConfig() {
   cached = await call<PublicConfig>('GET', '/v1/config')
   return cached
 }
+export const feedbackConfig = () => cached ? Promise.resolve(cached) : loadConfig()
 export async function login() {
   if (session && Date.parse(session.expiresAt) > Date.now()) return
   if (!loggingIn) loggingIn = (async () => {
@@ -74,6 +81,14 @@ export const startParse = (input: Input, key: string) => request<Job>('POST', '/
 export const queryJob = (jobId: string) => request<Job>('GET', '/v1/parse-jobs/' + encodeURIComponent(jobId))
 export const cancelJob = (jobId: string) => request<Job>('DELETE', '/v1/parse-jobs/' + encodeURIComponent(jobId))
 export const queryResult = (resultId: string) => request<Result>('GET', '/v1/results/' + encodeURIComponent(resultId))
+export const submitFeedback = (data: FeedbackRequest, key: string) => request<FeedbackCreated>('POST', '/v1/feedbacks', data, key)
+export const queryFeedback = (feedbackId: string) => request<FeedbackDetail>('GET', '/v1/feedbacks/' + encodeURIComponent(feedbackId))
+export async function listFeedback(cursor: string, owner: string) {
+  const data = await request<FeedbackPage>('GET', '/v1/feedbacks' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''))
+  const userId = session?.userId || ''
+  if (!userId || (owner && owner !== userId)) throw new APIError('FEEDBACK_REFRESH_REQUIRED', '当前使用身份已变更，请刷新列表')
+  return { data, userId }
+}
 export async function previewAsset(resultId: string, assetId: string, kind: PreviewKind) {
   const { previews } = await request<{ previews: { assetId: string; mode: string; url: string | null; expiresAt: string | null }[] }>('POST', '/v1/results/' + encodeURIComponent(resultId) + '/preview-tickets', { assetIds: [assetId] })
   const entry = previews.find(p => p.assetId === assetId)

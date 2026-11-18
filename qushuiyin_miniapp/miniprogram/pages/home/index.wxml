@@ -4,6 +4,7 @@
     <view class="row spread"><label class="section-title" for="share">分享链接</label><button class="action quiet" disabled="{{busy || !inputReady}}" bindtap="example" hover-class="button-press">填入示例</button></view>
     <textarea id="share" class="share-input" placeholder="粘贴链接或分享文案" value="{{text}}" maxlength="{{maxLength}}" disabled="{{busy || !inputReady}}" bindinput="edit" />
     <text wx:if="{{error}}" class="error" role="alert">{{error}}</text>
+    <navigator wx:if="{{error && inputReady && !candidates.length}}" class="action-link quiet-link" url="{{'/pages/feedback/create' + (feedbackTrace ? '?traceId=' + feedbackTrace : '')}}" hover-class="button-press">问题反馈</navigator>
     <button wx:for="{{candidates}}" wx:key="url" class="action" bindtap="choose" data-index="{{index}}">链接 {{index + 1}} · {{item.displayHost}}</button>
     <view class="row input-actions">
       <button class="action" disabled="{{busy || !inputReady}}" bindtap="paste" hover-class="button-press"><image class="icon" src="/icons/clipboard.svg" />粘贴</button>

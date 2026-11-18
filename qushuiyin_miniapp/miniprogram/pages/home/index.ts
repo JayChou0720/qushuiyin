@@ -2,7 +2,7 @@ import { APIError, Candidate, cancelJob, id, loadConfig, queryJob, startParse, w
 
 const names: Record<string, string> = { douyin: '抖音', xiaohongshu: '小红书', kuaishou: '快手', bilibili: 'B 站' }
 Page({
-  data: { text: '', pasted: false, maxLength: 0, parseWait: 0, inputReady: false, busy: false, error: '', job: '', sequence: 0, candidates: [] as Candidate[], platforms: [] as { name: string; available: boolean }[] },
+  data: { text: '', pasted: false, maxLength: 0, parseWait: 0, inputReady: false, busy: false, error: '', job: '', feedbackTrace: '', sequence: 0, candidates: [] as Candidate[], platforms: [] as { name: string; available: boolean }[] },
   onLoad() { void this.reloadConfig() },
   onUnload() { void this.cancel() },
   async reloadConfig() {
@@ -12,18 +12,18 @@ Page({
         platforms: config.platforms.map(p => ({ name: names[p.platform] || p.platform, available: p.status === 'enabled' && (p.videoEnabled || p.imageEnabled) })) })
     } catch (error) { this.setData({ error: (error as Error).message }) }
   },
-  edit(e: WechatMiniprogram.CustomEvent<{ value: string }>) { this.setData({ text: e.detail.value, pasted: false, candidates: [], error: '' }) },
+  edit(e: WechatMiniprogram.CustomEvent<{ value: string }>) { this.setData({ text: e.detail.value, pasted: false, feedbackTrace: '', candidates: [], error: '' }) },
   paste() {
-    wx.getClipboardData({ success: r => this.setData({ text: r.data, pasted: true, candidates: [], error: '' }), fail: () => this.setData({ error: '未读取剪贴板，可手动输入链接' }) })
+    wx.getClipboardData({ success: r => this.setData({ text: r.data, pasted: true, feedbackTrace: '', candidates: [], error: '' }), fail: () => this.setData({ feedbackTrace: '', error: '未读取剪贴板，可手动输入链接' }) })
   },
-  example() { this.setData({ text: 'https://www.douyin.com/video/10001', pasted: false, candidates: [], error: '' }) },
+  example() { this.setData({ text: 'https://www.douyin.com/video/10001', pasted: false, feedbackTrace: '', candidates: [], error: '' }) },
   parse() { void this.submit(null) },
   choose(e: WechatMiniprogram.CustomEvent) { const candidate = this.data.candidates[Number(e.currentTarget.dataset.index)]; if (candidate) void this.submit(candidate.url) },
   async submit(selectedUrl: string | null) {
     if (this.data.busy) return
-    if (!this.data.text.trim()) { this.setData({ error: '请粘贴作品分享链接' }); return }
+    if (!this.data.text.trim()) { this.setData({ error: '请粘贴作品分享链接', feedbackTrace: '' }); return }
     const sequence = this.data.sequence + 1, flowId = id()
-    this.setData({ sequence, busy: true, error: '', candidates: [], job: '' })
+    this.setData({ sequence, busy: true, error: '', candidates: [], job: '', feedbackTrace: '' })
     try {
       let job = await startParse({ shareText: this.data.text, selectedUrl, source: this.data.pasted ? 'paste' : 'manual', flowId }, id())
       if (this.data.sequence !== sequence) { await cancelJob(job.jobId); return }
@@ -36,7 +36,10 @@ Page({
         job = await queryJob(job.jobId)
       }
       if (this.data.sequence !== sequence) return
-      if (job.status !== 'SUCCEEDED' || !job.resultId) throw new Error(job.error?.message || '未能取得解析结果')
+      if (job.status !== 'SUCCEEDED' || !job.resultId) {
+        this.setData({ feedbackTrace: job.error?.traceId || '' })
+        throw new Error(job.error?.message || '未能取得解析结果')
+      }
       wx.navigateTo({ url: '/pages/result/index?resultId=' + encodeURIComponent(job.resultId) + '&flowId=' + encodeURIComponent(flowId) })
     } catch (error) {
       if (this.data.sequence !== sequence) return

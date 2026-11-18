@@ -1,0 +1,12 @@
+@import "./shared.wxss";
+.feedback-form { gap: 20px; }
+.feedback-control { display: block; width: 100%; min-height: 48px; box-sizing: border-box; border: 1px solid #c9d4e3; border-radius: 8px; padding: 10px 12px; background: #fafbfd; color: #18243b; }
+.feedback-control.picker-control { display: flex; gap: 12px; }
+.placeholder { color: #526179; }
+.picker-arrow { width: 7px; height: 7px; border: solid #526179; border-width: 0 2px 2px 0; transform: rotate(45deg); margin-right: 2px; margin-bottom: 4px; flex-shrink: 0; }
+.feedback-textarea { min-height: 112px; }
+.feedback-field-error { color: #9d2330; font-size: 14px; overflow-wrap: anywhere; }
+.feedback-count { align-items: flex-start; }
+.feedback-count .muted:last-child { flex-shrink: 0; }
+.feedback-check { display: flex; align-items: center; gap: 8px; min-height: 48px; }
+.feedback-attachments { gap: 8px; border-top: 1px solid #e0e6ef; padding-top: 8px; }

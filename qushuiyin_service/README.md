@@ -27,6 +27,8 @@ node ./qushuiyin_service/scripts/smoke-mock.mjs
 
 同一个接口脚本还使用独立的开发身份验证反馈、事件和数据清理。反馈链接只在明确附带时接受；反馈与事件写入本地 MySQL。Mock 事件暂用以下值：`stage` 为 `result/preview/save/download/album`，`outcome` 为 `started/succeeded/failed/cancelled/partial/unknown`，`osFamily` 为 `ios/android/windows/macos/devtools/unknown`。重复事件按用户与事件 ID 判定；本人失败解析可用 `error.traceId` 关联反馈。
 
+在模拟器中，从「使用帮助」进入「提交反馈」或「我的反馈」。提交测试反馈后会显示工单编号；通过本地管理接口回复该工单，再打开「我的反馈」，可核对状态、最新回复和回复时间。附带作品链接默认未勾选，取消勾选会清除已输入的链接。
+
 清理请求撤销本地开发用户的会话和票据，并记录可在重启后继续处理的任务；共用的合成样本不受影响。`go test -run TestMockPrivacyMySQL ./internal/httpapi` 使用隔离测试库验证删除边界。该测试不覆盖真实媒体文件和备份恢复。
 
 ## M0：能力验证

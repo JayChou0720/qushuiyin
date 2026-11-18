@@ -16,3 +16,7 @@ button.action[disabled] { background: #e9edf4; color: #526179; }
 .error { color: #9d2330; background: #fff1f1; border-radius: 8px; padding: 10px 12px; font-size: 14px; }
 .badge { color: #2653bd; background: #edf3ff; border-radius: 4px; padding: 3px 8px; font-size: 12px; }
 .icon { width: 18px; height: 18px; flex: 0 0 18px; }
+.action-link { min-height: 48px; display: flex; align-items: center; justify-content: center; box-sizing: border-box; padding: 8px 14px; border-radius: 8px; background: #edf3ff; color: #244fbd; font-size: 15px; line-height: 1.4; }
+.primary-link { background: #2458dc; color: #fff; font-weight: 650; }
+.quiet-link { background: transparent; align-self: flex-start; }
+.help-feedback { gap: 8px; }

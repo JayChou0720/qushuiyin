@@ -1,0 +1,4 @@
+@import "./shared.wxss";
+.ticket-meta { gap: 6px; }
+.ticket-heading { flex-wrap: wrap; }
+.feedback-reply { border-top: 1px solid #e0e6ef; padding-top: 16px; }

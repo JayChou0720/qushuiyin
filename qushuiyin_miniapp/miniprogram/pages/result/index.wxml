@@ -40,5 +40,6 @@
     <text wx:elif="{{status}}" class="muted" aria-live="polite">{{status}}</text>
     <button wx:if="{{retryAvailable && !busy}}" class="action" bindtap="retrySave" hover-class="button-press">重试未完成项</button>
     <button wx:for="{{copyItems}}" wx:key="itemId" class="action" bindtap="copyLink" data-item="{{item.itemId}}" hover-class="button-press">复制{{result.mediaType === 'image' ? '图片 ' + item.order + ' 的' : ''}}下载链接</button>
+    <navigator class="action-link quiet-link" url="/pages/feedback/create" hover-class="button-press">问题反馈</navigator>
   </block>
 </view>

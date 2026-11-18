@@ -1,0 +1,16 @@
+<view class="screen stack feedback-screen">
+  <view class="row spread feedback-heading"><text class="title">我的反馈</text><navigator class="action-link" url="/pages/feedback/create" hover-class="button-press">提交反馈</navigator></view>
+  <text wx:if="{{busy}}" class="muted" aria-live="polite">正在读取反馈</text>
+  <block wx:elif="{{error}}"><text class="error" role="alert">{{error}}</text><button class="action feedback-button" bindtap="refresh" hover-class="button-press">重新加载</button></block>
+  <view wx:elif="{{!items.length}}" class="surface"><text class="muted">暂无反馈记录</text></view>
+  <block wx:else>
+    <view class="stack feedback-list">
+      <navigator wx:for="{{items}}" wx:key="id" class="surface stack feedback-list-item" url="{{'/pages/feedback/detail?id=' + item.id}}" hover-class="button-press">
+        <view class="row spread feedback-heading"><text class="section-title">{{item.categoryLabel}}</text><text class="feedback-state {{item.status}}">{{item.statusLabel}}</text></view>
+        <text class="feedback-text feedback-summary">{{item.summary}}</text>
+        <text class="muted">{{item.submitted}}</text>
+      </navigator>
+    </view>
+    <button wx:if="{{cursor}}" class="action feedback-button" bindtap="more" disabled="{{loadingMore}}" loading="{{loadingMore}}" hover-class="button-press">{{loadingMore ? '正在加载' : '加载更多'}}</button>
+  </block>
+</view>

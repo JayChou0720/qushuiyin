@@ -1,0 +1,53 @@
+<view class="screen stack feedback-screen">
+  <text class="title">问题反馈</text>
+  <block wx:if="{{created}}">
+    <view class="surface stack" aria-live="polite">
+      <text class="section-title">反馈已提交</text>
+      <view class="feedback-field"><text class="muted">工单编号</text><text class="feedback-id" user-select>{{created.feedbackId}}</text></view>
+    </view>
+    <navigator class="action-link primary-link" url="{{'/pages/feedback/detail?id=' + created.feedbackId}}" hover-class="button-press">查看反馈</navigator>
+    <navigator class="action-link" url="/pages/feedback/list" open-type="redirect" hover-class="button-press">我的反馈</navigator>
+  </block>
+  <block wx:elif="{{ready}}">
+    <view class="surface stack feedback-form">
+      <view class="feedback-field">
+        <text class="section-title" id="category-label">问题类型</text>
+        <picker aria-labelledby="category-label" mode="selector" value="{{categoryIndex}}" range="{{categories}}" range-key="label" disabled="{{busy}}" bindchange="choose">
+          <view class="feedback-control picker-control row spread {{category ? '' : 'placeholder'}}"><text>{{categoryLabel}}</text><text class="picker-arrow" aria-hidden="true"></text></view>
+        </picker>
+        <text wx:if="{{categoryError}}" class="feedback-field-error" role="alert">{{categoryError}}</text>
+      </view>
+      <view class="feedback-field">
+        <label class="section-title" for="feedback-content">问题描述</label>
+        <textarea class="feedback-control feedback-textarea" id="feedback-content" value="{{content}}" placeholder="简要描述遇到的问题" maxlength="{{maxContent * 2}}" disabled="{{busy}}" bindinput="editContent" bindblur="blurContent" />
+        <view class="row spread feedback-count"><text wx:if="{{contentError}}" class="feedback-field-error" role="alert">{{contentError}}</text><text wx:else class="muted">至少 {{minContent}} 字</text><text class="muted">{{contentLength}} / {{maxContent}}</text></view>
+      </view>
+      <view class="feedback-field">
+        <label class="section-title" for="feedback-contact">联系方式 <text class="muted">（选填）</text></label>
+        <input class="feedback-control" id="feedback-contact" value="{{contact}}" placeholder="邮箱或其他联系方式" maxlength="{{maxContact * 2}}" disabled="{{busy}}" bindinput="editContact" />
+        <text wx:if="{{contactError}}" class="feedback-field-error" role="alert">{{contactError}}</text>
+      </view>
+      <view class="stack feedback-attachments">
+        <view wx:if="{{traceId}}" class="feedback-field">
+          <checkbox-group bindchange="toggleTrace"><label class="feedback-check"><checkbox value="trace" checked="{{includeTrace}}" disabled="{{busy}}" />附带本次诊断编号</label></checkbox-group>
+          <text wx:if="{{traceError}}" class="feedback-field-error" role="alert">{{traceError}}</text>
+        </view>
+        <view class="feedback-field">
+          <checkbox-group bindchange="toggleSource"><label class="feedback-check"><checkbox value="source" checked="{{includeSource}}" disabled="{{busy}}" />附带本次作品链接，便于排查</label></checkbox-group>
+          <block wx:if="{{includeSource}}">
+            <label class="section-title" for="feedback-source">作品链接</label>
+            <input class="feedback-control" id="feedback-source" value="{{sourceUrl}}" placeholder="输入作品分享链接" maxlength="{{maxSource}}" disabled="{{busy}}" bindinput="editSource" />
+            <text class="muted">链接可能含有用于访问作品的参数。</text>
+            <text wx:if="{{sourceError}}" class="feedback-field-error" role="alert">{{sourceError}}</text>
+          </block>
+        </view>
+      </view>
+    </view>
+    <text wx:if="{{submitError}}" class="error" role="alert">{{submitError}}</text>
+    <button class="action primary feedback-button" disabled="{{busy}}" loading="{{busy}}" bindtap="submit" hover-class="button-press">{{busy ? '正在提交' : '提交反馈'}}</button>
+  </block>
+  <block wx:elif="{{configError}}">
+    <text class="error" role="alert">{{configError}}</text><button class="action feedback-button" bindtap="loadLimits" hover-class="button-press">重试连接</button>
+  </block>
+  <text wx:else class="muted" aria-live="polite">正在加载反馈表单</text>
+</view>

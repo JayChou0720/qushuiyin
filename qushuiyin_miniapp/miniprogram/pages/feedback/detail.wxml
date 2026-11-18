@@ -1,0 +1,15 @@
+<view class="screen stack feedback-screen">
+  <text class="title">反馈详情</text>
+  <text wx:if="{{busy}}" class="muted" aria-live="polite">正在读取反馈</text>
+  <view wx:elif="{{missing}}" class="surface"><text class="muted" role="alert">该反馈已不存在</text></view>
+  <block wx:elif="{{error}}"><text class="error" role="alert">{{error}}</text><button class="action feedback-button" bindtap="load" hover-class="button-press">重新加载</button></block>
+  <view wx:elif="{{ticket}}" class="surface stack feedback-panel">
+    <view class="stack ticket-meta">
+      <view class="row spread ticket-heading"><text class="section-title">{{ticket.categoryLabel}}</text><text class="feedback-state {{ticket.status}}">{{ticket.statusLabel}}</text></view>
+      <text class="muted">提交于 {{ticket.submitted}}</text>
+      <text class="muted feedback-id" user-select>工单编号 {{ticket.id}}</text>
+    </view>
+    <view class="feedback-field"><text class="section-title">反馈内容</text><text class="feedback-text" user-select>{{ticket.content}}</text><text wx:if="{{ticket.contact}}" class="muted">联系方式 {{ticket.contact}}</text></view>
+    <view class="feedback-field feedback-reply"><text class="section-title">处理结果</text><text wx:if="{{ticket.lastReply}}" class="muted">最近回复于 {{ticket.lastReply}}</text><text wx:if="{{ticket.reply}}" class="feedback-text" user-select>{{ticket.reply}}</text><text wx:else class="muted">暂无回复</text></view>
+  </view>
+</view>
