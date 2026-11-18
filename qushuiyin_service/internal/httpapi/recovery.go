@@ -34,11 +34,14 @@ func (s *Mock) refreshBatch(b *batch, now time.Time) {
 	for i := range b.Items {
 		x := &b.Items[i]
 		if x.Status == "READY" && x.AvailableUntil.Sub(now) < s.downloadBudget() {
-			x.Status = "EXPIRED"
-			x.Failure = "MEDIA_SOURCE_EXPIRED"
+			x.expire()
 		}
 	}
 	b.aggregate()
+}
+
+func (x *item) expire() {
+	x.Status, x.Failure, x.DirectURL = "EXPIRED", "MEDIA_SOURCE_EXPIRED", ""
 }
 
 func (s *Mock) prepare(b *batch, x *item, now time.Time) {

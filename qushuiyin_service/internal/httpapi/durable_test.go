@@ -368,6 +368,11 @@ func TestDurableTasksMySQL(t *testing.T) {
 		if _, e = db.Exec("UPDATE media_file SET expires_at=UTC_TIMESTAMP(3)-INTERVAL 1 SECOND WHERE id=?", fileID); e != nil {
 			t.Fatal(e)
 		}
+		otherRequest("POST", "/v1/save-batches/"+otherBatch+"/tickets", string(otherIDs), 410)
+		var itemStatus string
+		if e = db.QueryRow("SELECT prepare_status FROM save_batch_item WHERE id=? AND user_id=?", otherItem, other.UserID).Scan(&itemStatus); e != nil || itemStatus != "EXPIRED" {
+			t.Fatal("ticket expiry was not persisted", itemStatus, e)
+		}
 		relay.CleanOnce(ctx)
 		if f, e := relay.Open(key); e != nil {
 			t.Fatal("GC removed an active transfer")

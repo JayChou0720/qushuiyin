@@ -134,8 +134,10 @@ func (s *Mock) persistentBatchRequest(w http.ResponseWriter, r *http.Request, c 
 	}
 	out := &bufferedResponse{header: w.Header().Clone()}
 	next(out, r, c)
-	if out.status < 400 {
-		if err := s.saveBatchRequest(r.Context(), c, state); err != nil {
+	success := out.status < 400
+	ticketExpired := out.status == http.StatusGone && r.Pattern == "POST /v1/save-batches/{batchId}/tickets"
+	if success || ticketExpired {
+		if err := s.saveBatchRequest(r.Context(), c, state, success); err != nil {
 			if errors.Is(err, errCopyQuota) {
 				fail(w, 429, "DAILY_LIMIT_REACHED")
 				return
@@ -306,7 +308,7 @@ func (s *Mock) persistentEventOwner(e clientEvent, user string, now time.Time) b
 	var n int
 	return s.Sessions.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM save_batch_item WHERE id=? AND batch_id=? AND user_id=?", *e.ItemID, *e.BatchID, user).Scan(&n) == nil && n == 1
 }
-func (s *Mock) saveBatchRequest(ctx context.Context, c credential, state batchRequestState) error {
+func (s *Mock) saveBatchRequest(ctx context.Context, c credential, state batchRequestState, commitSignals bool) error {
 	var b *batch
 	for _, b = range state.batches {
 	}
@@ -319,7 +321,9 @@ func (s *Mock) saveBatchRequest(ctx context.Context, c credential, state batchRe
 	signals := make([]item, 0, len(b.Items))
 	for i, x := range b.Items {
 		if x.DirectIssuedPending+x.CopyPending+x.RelayIssuedPending > 0 || x.FallbackPending {
-			signals = append(signals, x)
+			if commitSignals {
+				signals = append(signals, x)
+			}
 			x.DirectIssuedPending, x.CopyPending, x.RelayIssuedPending, x.FallbackPending = 0, 0, 0, false
 		}
 		if original == nil || x != original.Items[i] {
