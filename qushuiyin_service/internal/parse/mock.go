@@ -17,11 +17,11 @@ func Mock(l config.Limits, policy map[string]Capability) (Adapter, error) {
 	if err := json.Unmarshal(fixtures.Samples, &samples); err != nil {
 		return Adapter{}, err
 	}
-	return Adapter{l, policy, func(_ context.Context, raw string) (*parser.VideoParseInfo, error) {
+	return Adapter{Limits: l, Policy: policy, Resolve: func(_ context.Context, raw string) (*parser.VideoParseInfo, error) {
 		s, ok := samples[raw]
 		if !ok || s.Failure {
 			return nil, Unavailable
 		}
 		return s.Info, nil
-	}, func(context.Context, string, string) *url.URL { return nil }}, nil
+	}, Canonical: func(context.Context, string, string) *url.URL { return nil }}, nil
 }

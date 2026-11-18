@@ -13,7 +13,7 @@
 
 | 日期 / 环境 | 平台 / 内容类型 | 样本数 / 成功数 | 失败类别 | 解析器提交 | iOS / Android 客户端版本 |
 | --- | --- | --- | --- | --- | --- |
-| 2026-11-18 / Windows CLI | B 站 / 开放许可多 P 视频 | 1 个作品：第 2P 按预期拒绝，第 1P 未通过 | 第 1P：HTTPS 视频，HTTP 封面，`UPSTREAM_INVALID_RESPONSE` | 同上 | 未测 |
+| 2026-11-18 / Windows CLI | B 站 / 开放许可多 P 视频 | 1 个作品：第 1P 返回视频和封面，第 2P 按预期拒绝 | 视频未通过直连探测：`application/octet-stream`；封面升级 HTTPS 后通过图片探测，域名未登记 | 同上 | 未测 |
 | 2026-11-18 / Windows CLI | 快手 / 视频 | 1 / 1，仅探测 | 域名未登记 | 同上 | 未测 |
 | 2026-11-18 / Windows CLI | 抖音 / 视频 | 3 / 0，仅探测 | `UPSTREAM_UNAVAILABLE` | 同上 | 未测 |
 | 2026-11-18 / Windows CLI | 小红书 / 内容类型未确认 | 1 / 0，仅探测 | `UPSTREAM_UNAVAILABLE` | 同上 | 未测 |
@@ -22,6 +22,8 @@
 | --- | --- | --- | --- | --- |
 | tymov2.a.kwimgs.com | 快手 | 1 / video/mp4（56,703,677 字节） | 未登记 | 未测 |
 | p2.a.yximgs.com | 快手 | 1 / image/jpeg（28,197 字节） | 未登记 | 未测 |
+| upos-sz-estgcos.bilivideo.com | B 站 | 1 / application/octet-stream（74,150,122 字节） | 未登记 | 未测 |
+| i2.hdslb.com | B 站 | 1 / image/png（23,044 字节） | 未登记 | 未测 |
 
 B 站样本是 Blender Foundation 的 *Big Buck Bunny*（Peach 项目许可：CC BY 3.0）。其余探测只用了公开技术报告或项目文档中用于复现的链接，只读取元数据与响应头，未下载或保存媒体。这些探测不计入有授权的下载样本数，也不用于推算平台成功率。
 

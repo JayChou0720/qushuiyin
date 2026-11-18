@@ -42,10 +42,11 @@ type Result struct {
 	Mixed                                     bool
 }
 type Adapter struct {
-	Limits    config.Limits
-	Policy    map[string]Capability
-	Resolve   func(context.Context, string) (*parser.VideoParseInfo, error)
-	Canonical func(context.Context, string, string) *url.URL
+	Limits      config.Limits
+	Policy      map[string]Capability
+	Resolve     func(context.Context, string) (*parser.VideoParseInfo, error)
+	Canonical   func(context.Context, string, string) *url.URL
+	coverClient outbound.Client
 }
 
 func Live(l config.Limits, policy map[string]Capability, c outbound.Client) Adapter {
@@ -64,7 +65,7 @@ func Live(l config.Limits, policy map[string]Capability, c outbound.Client) Adap
 			return nil
 		}
 		return resp.Request.URL
-	}}
+	}, c}
 }
 func text(s string) *string {
 	if strings.TrimSpace(s) == "" {
@@ -177,7 +178,20 @@ func (a Adapter) Parse(ctx context.Context, raw string) (*Result, error) {
 		r.Assets = []Asset{x}
 	}
 	if cap.Cover && info.CoverUrl != "" {
-		x, e := asset(info.CoverUrl, "image", "cover", 1)
+		source := info.CoverUrl
+		if p == "bilibili" {
+			source = a.bilibiliCover(call, source)
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return nil, Canceled
+			}
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return nil, Timeout
+			}
+			if source == "" {
+				return r, nil
+			}
+		}
+		x, e := asset(source, "image", "cover", 1)
 		if e != nil {
 			return nil, e
 		}
