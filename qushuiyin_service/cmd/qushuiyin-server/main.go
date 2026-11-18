@@ -109,7 +109,11 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 	if e != nil {
 		return e
 	}
-	rep := report{Mode: mode, Version: parse.Version, At: time.Now().UTC(), Platform: r.Platform, ID: r.ContentID, Kind: r.MediaType, Count: len(r.Assets), Mixed: r.Mixed, Warnings: r.Warnings}
+	version := parse.Version
+	if mode == "live" && r.Platform == "douyin" {
+		version = parse.DouyinH5Version
+	}
+	rep := report{Mode: mode, Version: version, At: time.Now().UTC(), Platform: r.Platform, ID: r.ContentID, Kind: r.MediaType, Count: len(r.Assets), Mixed: r.Mixed, Warnings: r.Warnings}
 	probe := media.Probe{Client: client, Limits: l, Domains: store}
 	batch, cancel := context.WithTimeout(ctx, l.Batch)
 	defer cancel()

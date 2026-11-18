@@ -78,7 +78,7 @@ func TestErrorMapping(t *testing.T) {
 	for _, tc := range []struct {
 		info             *parser.VideoParseInfo
 		cause, errorWant error
-	}{{nil, nil, InvalidResponse}, {&parser.VideoParseInfo{}, nil, InvalidResponse}, {&parser.VideoParseInfo{VideoUrl: "http://x.test/v"}, nil, InvalidResponse}, {nil, errors.New("private source text"), Unavailable}, {nil, context.DeadlineExceeded, Timeout}} {
+	}{{nil, nil, InvalidResponse}, {&parser.VideoParseInfo{}, nil, InvalidResponse}, {&parser.VideoParseInfo{VideoUrl: "ftp://x.test/v"}, nil, InvalidResponse}, {nil, errors.New("private source text"), Unavailable}, {nil, context.DeadlineExceeded, Timeout}} {
 		a.Resolve = func(context.Context, string) (*parser.VideoParseInfo, error) { return tc.info, tc.cause }
 		if _, e := a.Parse(t.Context(), raw); e != tc.errorWant {
 			t.Fatal(e)
@@ -88,6 +88,37 @@ func TestErrorMapping(t *testing.T) {
 	cancel()
 	if _, e := a.Parse(ctx, raw); e != Canceled {
 		t.Fatal(e)
+	}
+}
+
+func TestXiaohongshuMediaHTTPSUpgrade(t *testing.T) {
+	a, err := Mock(config.Defaults(), ValidationPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const share = "https://www.xiaohongshu.com/explore/123abc"
+	const source = "http://cdn.example.test/a%2fb?sig=%2f+x&sig=2"
+	const upgraded = "https://cdn.example.test/a%2fb?sig=%2f+x&sig=2"
+	for _, info := range []*parser.VideoParseInfo{
+		{VideoUrl: source, CoverUrl: source},
+		{Images: []parser.ImgInfo{{Url: source}}},
+	} {
+		a.Resolve = func(context.Context, string) (*parser.VideoParseInfo, error) { return info, nil }
+		r, err := a.Parse(t.Context(), share)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(r.Assets) != 1 || r.Assets[0].Source != upgraded || (info.CoverUrl != "" && (r.Cover == nil || r.Cover.Source != upgraded)) {
+			t.Fatal("HTTPS upgrade changed the path or signed query")
+		}
+	}
+	for _, raw := range []string{"http://user@cdn.example.test/v", "http://cdn.example.test:80/v", "http://127.0.0.1/v"} {
+		a.Resolve = func(context.Context, string) (*parser.VideoParseInfo, error) {
+			return &parser.VideoParseInfo{VideoUrl: raw}, nil
+		}
+		if _, err := a.Parse(t.Context(), share); err != InvalidResponse {
+			t.Fatalf("unsafe media URL passed or produced the wrong error: %v", err)
+		}
 	}
 }
 

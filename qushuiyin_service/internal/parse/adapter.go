@@ -3,13 +3,14 @@ package parse
 import (
 	"context"
 	"errors"
-	"github.com/wujunwei928/parse-video/parser"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
+
+	"github.com/wujunwei928/parse-video/parser"
 	"qushuiyin/service/internal/config"
 	"qushuiyin/service/internal/outbound"
-	"strings"
 )
 
 const Version = "00e8e118c7c52e287b6b06858639ee86aab0579c"
@@ -46,26 +47,41 @@ type Adapter struct {
 	Policy      map[string]Capability
 	Resolve     func(context.Context, string) (*parser.VideoParseInfo, error)
 	Canonical   func(context.Context, string, string) *url.URL
+	douyin      func(context.Context, string) (*parser.VideoParseInfo, error)
 	coverClient outbound.Client
 }
 
 func Live(l config.Limits, policy map[string]Capability, c outbound.Client) Adapter {
-	return Adapter{l, policy, func(ctx context.Context, raw string) (*parser.VideoParseInfo, error) {
-		if os.Getenv("PARSE_VIDEO_DOUYIN_COOKIE") != "" {
-			return nil, Unavailable
-		}
-		return parser.ParseVideoShareUrlContext(ctx, raw)
-	}, func(ctx context.Context, p, raw string) *url.URL {
-		resp, err := c.Headers(ctx, raw, http.MethodHead, "", func(u *url.URL) bool { return Platform(u) == p })
-		if err != nil {
-			return nil
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil
-		}
-		return resp.Request.URL
-	}, c}
+	return Adapter{
+		Limits: l,
+		Policy: policy,
+		Resolve: func(ctx context.Context, raw string) (*parser.VideoParseInfo, error) {
+			if os.Getenv("PARSE_VIDEO_DOUYIN_COOKIE") != "" {
+				return nil, Unavailable
+			}
+			return parser.ParseVideoShareUrlContext(ctx, raw)
+		},
+		Canonical: func(ctx context.Context, p, raw string) *url.URL {
+			resp, err := c.Headers(ctx, raw, http.MethodHead, "", func(u *url.URL) bool {
+				if p == "douyin" {
+					return h5Host(u)
+				}
+				return Platform(u) == p
+			})
+			if err != nil {
+				return nil
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				return nil
+			}
+			return resp.Request.URL
+		},
+		douyin: func(ctx context.Context, id string) (*parser.VideoParseInfo, error) {
+			return douyinItem(ctx, c, id)
+		},
+		coverClient: c,
+	}
 }
 func text(s string) *string {
 	if strings.TrimSpace(s) == "" {
@@ -114,12 +130,25 @@ func (a Adapter) Parse(ctx context.Context, raw string) (*Result, error) {
 	}
 	call, done := context.WithTimeout(ctx, a.Limits.ParserCall)
 	defer done()
-	info, err := a.Resolve(call, raw)
+	var info *parser.VideoParseInfo
+	if p == "douyin" && a.douyin != nil {
+		work := contentID(p, canonical)
+		if work == nil {
+			err = Unavailable
+		} else {
+			info, err = a.douyin(call, *work)
+		}
+	} else {
+		info, err = a.Resolve(call, raw)
+	}
 	if errors.Is(call.Err(), context.Canceled) {
 		return nil, Canceled
 	}
 	if errors.Is(call.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
 		return nil, Timeout
+	}
+	if errors.Is(err, InvalidResponse) {
+		return nil, InvalidResponse
 	}
 	if err != nil {
 		return nil, Unavailable
@@ -137,6 +166,9 @@ func (a Adapter) Parse(ctx context.Context, raw string) (*Result, error) {
 		}
 	}
 	asset := func(raw, kind, role string, i int) (Asset, error) {
+		if strings.HasPrefix(strings.ToLower(raw), "http://") {
+			raw = "https" + raw[len("http"):]
+		}
 		u, e := url.Parse(raw)
 		if e != nil || !outbound.HTTPS(u) {
 			return Asset{}, InvalidResponse
