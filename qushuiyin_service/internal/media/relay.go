@@ -43,7 +43,10 @@ type Relay struct {
 	mu                 sync.Mutex
 	pending            map[string]chan struct{}
 	active             map[string]int
-	reserved           int64
+	deleting           map[string]bool
+	usageLoaded        bool
+	loadingUsage       chan struct{}
+	used, reserved     int64
 	imageSlots         chan struct{}
 }
 
@@ -89,9 +92,9 @@ func (r *Relay) prepare(ctx context.Context, platform, contentID, version string
 	var existing Prepared
 	err := r.DB.QueryRowContext(ctx, "SELECT id,storage_key,mime_type,size_bytes,sha256,converted,expires_at FROM media_file WHERE share_key=? AND output_version=? AND status='ready' AND expires_at>UTC_TIMESTAMP(3)", share, version).Scan(&existing.ID, &existing.StorageKey, &existing.MIME, &existing.Size, &existing.Hash, &existing.Converted, &existing.Expires)
 	if err == nil {
-		if f, e := r.Open(existing.StorageKey); e == nil {
+		if f, release, e := r.Acquire(existing.StorageKey); e == nil {
+			defer release()
 			info, e := f.Stat()
-			f.Close()
 			if e == nil && info.Size() == existing.Size {
 				var ready time.Time
 				if e = r.DB.QueryRowContext(ctx, "SELECT ready_at FROM media_file WHERE id=?", existing.ID).Scan(&ready); e != nil {
@@ -119,21 +122,35 @@ func (r *Relay) prepare(ctx context.Context, platform, contentID, version string
 	if err != nil {
 		return Prepared{}, err
 	}
-	defer release()
+	var committed int64
+	var releaseFile func()
+	defer func() {
+		release(committed)
+		if releaseFile != nil {
+			releaseFile()
+		}
+	}()
 	sources := append([]string{a.Source}, a.Alternates...)
 	var last error
 	for i, source := range sources {
 		if int64(i) >= r.Settings.Int("max_media_candidates") {
 			break
 		}
-		file, e := r.fetchOutput(ctx, source, a.Kind, thumbnail)
+		storageKey := auth.ID() + ".media"
+		hold, e := r.holdFile(storageKey)
 		if e != nil {
+			return Prepared{}, e
+		}
+		file, e := r.fetchOutputTo(ctx, source, a.Kind, storageKey, thumbnail)
+		if e != nil {
+			hold()
 			if errors.Is(e, errAnimatedWebP) {
 				return Prepared{}, e
 			}
 			last = e
 			continue
 		}
+		releaseFile = hold
 		now := time.Now().UTC()
 		file.ID = auth.ID()
 		file.Expires = now.Add(r.Settings.Seconds("media_cache_ttl_seconds"))
@@ -157,6 +174,7 @@ func (r *Relay) prepare(ctx context.Context, platform, contentID, version string
 			_ = os.Remove(filepath.Join(r.Directory, file.StorageKey))
 			return Prepared{}, e
 		}
+		committed = file.Size
 		return file, nil
 	}
 	if last == nil {
@@ -165,8 +183,12 @@ func (r *Relay) prepare(ctx context.Context, platform, contentID, version string
 	return Prepared{}, last
 }
 
+func validStorageKey(key string) bool {
+	return filepath.Base(key) == key && !strings.ContainsAny(key, "/\\:") && strings.HasSuffix(key, ".media")
+}
+
 func (r *Relay) Open(key string) (*os.File, error) {
-	if filepath.Base(key) != key || strings.ContainsAny(key, "/\\:") || !strings.HasSuffix(key, ".media") {
+	if !validStorageKey(key) {
 		return nil, errors.New("invalid media storage key")
 	}
 	path := filepath.Join(r.Directory, key)
@@ -184,6 +206,10 @@ func (r *Relay) fetch(ctx context.Context, source, kind string) (Prepared, error
 }
 
 func (r *Relay) fetchOutput(ctx context.Context, source, kind string, thumbnail bool) (Prepared, error) {
+	return r.fetchOutputTo(ctx, source, kind, auth.ID()+".media", thumbnail)
+}
+
+func (r *Relay) fetchOutputTo(ctx context.Context, source, kind, key string, thumbnail bool) (Prepared, error) {
 	var out Prepared
 	resp, err := r.Client.Headers(ctx, source, http.MethodGet, "", func(u *url.URL) bool { return outbound.HTTPS(u) })
 	if err != nil {
@@ -263,7 +289,6 @@ func (r *Relay) fetchOutput(ctx context.Context, source, kind string, thumbnail 
 	if err = part.Close(); err != nil {
 		return out, err
 	}
-	key := auth.ID() + ".media"
 	if err = os.Rename(path, filepath.Join(r.Directory, key)); err != nil {
 		return out, err
 	}
@@ -275,22 +300,63 @@ type limitedProbeOutput struct {
 	limit int
 }
 
-func (r *Relay) reserve(ctx context.Context, kind string) (func(), error) {
+// Bootstrap from existing rows once, before any reservation or GC mutation.
+// Failed reads can be retried without keeping unrelated transfers under a lock.
+func (r *Relay) loadUsage(ctx context.Context) error {
+	for {
+		r.mu.Lock()
+		if r.usageLoaded {
+			r.mu.Unlock()
+			return nil
+		}
+		if wait := r.loadingUsage; wait != nil {
+			r.mu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		done := make(chan struct{})
+		r.loadingUsage = done
+		r.mu.Unlock()
+
+		var used int64
+		err := r.DB.QueryRowContext(ctx, "SELECT COALESCE(SUM(size_bytes),0) FROM media_file").Scan(&used)
+
+		r.mu.Lock()
+		if err == nil {
+			r.used = used
+			r.usageLoaded = true
+		}
+		r.loadingUsage = nil
+		close(done)
+		r.mu.Unlock()
+		return err
+	}
+}
+
+func (r *Relay) reserve(ctx context.Context, kind string) (func(int64), error) {
 	limit := r.Settings.Int("max_image_bytes")
 	if kind == "video" {
 		limit = r.Settings.Int("relay_max_video_bytes")
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	var used int64
-	if err := r.DB.QueryRowContext(ctx, "SELECT COALESCE(SUM(size_bytes),0) FROM media_file").Scan(&used); err != nil {
+	if err := r.loadUsage(ctx); err != nil {
 		return nil, err
 	}
-	if limit <= 0 || used+r.reserved+limit > r.Settings.Int("media_cache_budget_bytes") {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if limit <= 0 || limit > r.Settings.Int("media_cache_budget_bytes")-r.used-r.reserved {
 		return nil, errors.New("SERVICE_BUSY")
 	}
 	r.reserved += limit
-	return sync.OnceFunc(func() { r.mu.Lock(); r.reserved -= limit; r.mu.Unlock() }), nil
+	return func(committed int64) {
+		r.mu.Lock()
+		r.reserved -= limit
+		r.used += committed
+		r.mu.Unlock()
+	}, nil
 }
 
 func (b *limitedProbeOutput) Write(p []byte) (int, error) {

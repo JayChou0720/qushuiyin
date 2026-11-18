@@ -3,35 +3,74 @@ package media
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 )
 
-func (r *Relay) Acquire(key string) (*os.File, func(), error) {
+func (r *Relay) holdFile(key string) (func(), error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	f, err := r.Open(key)
-	if err != nil {
-		return nil, nil, err
+	if r.deleting[key] {
+		return nil, os.ErrNotExist
 	}
 	if r.active == nil {
 		r.active = map[string]int{}
 	}
 	r.active[key]++
-	release := sync.OnceFunc(func() {
-		f.Close()
+	return func() {
 		r.mu.Lock()
+		defer r.mu.Unlock()
 		r.active[key]--
 		if r.active[key] == 0 {
 			delete(r.active, key)
 		}
-		r.mu.Unlock()
-	})
-	return f, release, nil
+	}, nil
 }
+
+func (r *Relay) Acquire(key string) (*os.File, func(), error) {
+	release, err := r.holdFile(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	f, err := r.Open(key)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	return f, sync.OnceFunc(func() {
+		f.Close()
+		release()
+	}), nil
+}
+
+func (r *Relay) claimRemoval(key string) bool {
+	if !validStorageKey(key) {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.active[key] > 0 || r.deleting[key] {
+		return false
+	}
+	if r.deleting == nil {
+		r.deleting = map[string]bool{}
+	}
+	r.deleting[key] = true
+	return true
+}
+
+func (r *Relay) finishRemoval(key string, bytes int64) {
+	r.mu.Lock()
+	r.used -= bytes
+	delete(r.deleting, key)
+	r.mu.Unlock()
+}
+
 func (r *Relay) Clean(ctx context.Context) {
 	ticker := time.NewTicker(r.Settings.Seconds("media_gc_interval_seconds"))
 	defer ticker.Stop()
@@ -45,70 +84,139 @@ func (r *Relay) Clean(ctx context.Context) {
 	}
 }
 func (r *Relay) CleanOnce(ctx context.Context) {
-	rows, err := r.DB.QueryContext(ctx, `SELECT f.id,f.storage_key FROM media_file f WHERE f.expires_at<=UTC_TIMESTAMP(3) AND NOT EXISTS (SELECT 1 FROM media_object o WHERE o.file_id=f.id AND o.status='ready' AND o.expires_at>UTC_TIMESTAMP(3)) LIMIT ?`, r.Settings.Int("pagination_max"))
+	if err := r.loadUsage(ctx); err != nil {
+		return
+	}
+	limit := int(r.Settings.Int("pagination_max"))
+	if limit <= 0 {
+		return
+	}
+	rows, err := r.DB.QueryContext(ctx, `SELECT f.id,f.storage_key,f.size_bytes FROM media_file f WHERE f.expires_at<=UTC_TIMESTAMP(3) AND NOT EXISTS (SELECT 1 FROM media_object o WHERE o.file_id=f.id AND o.status='ready' AND o.expires_at>UTC_TIMESTAMP(3)) LIMIT ?`, limit)
 	if err != nil {
 		return
 	}
-	type entry struct{ id, key string }
-	var pending []entry
+	var pending []expiredFile
 	for rows.Next() {
-		var e entry
-		if rows.Scan(&e.id, &e.key) != nil {
+		var f expiredFile
+		if rows.Scan(&f.id, &f.key, &f.size) != nil {
 			rows.Close()
 			return
 		}
-		pending = append(pending, e)
+		pending = append(pending, f)
 	}
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
 		return
 	}
-	for _, e := range pending {
-		if filepath.Base(e.key) != e.key || strings.ContainsAny(e.key, "/\\:") || !strings.HasSuffix(e.key, ".media") {
-			continue
-		}
-		r.mu.Lock()
-		if r.active[e.key] > 0 {
-			r.mu.Unlock()
-			continue
-		}
-		changed, err := r.DB.ExecContext(ctx, `UPDATE media_file f SET status='deleting',version=version+1 WHERE f.id=? AND f.expires_at<=UTC_TIMESTAMP(3) AND NOT EXISTS (SELECT 1 FROM media_object o WHERE o.file_id=f.id AND o.status='ready' AND o.expires_at>UTC_TIMESTAMP(3))`, e.id)
-		if err == nil {
-			n, _ := changed.RowsAffected()
-			if n > 0 {
-				err = os.Remove(filepath.Join(r.Directory, e.key))
-				if err == nil || errors.Is(err, os.ErrNotExist) {
-					_, _ = r.DB.ExecContext(ctx, "DELETE FROM media_file WHERE id=? AND status='deleting'", e.id)
-				}
-			}
-		}
-		r.mu.Unlock()
+	for _, f := range pending {
+		r.cleanExpiredFile(ctx, f)
 	}
-	// Incomplete files are never downloadable and have a bounded stale lifetime.
+
 	files, err := os.ReadDir(r.Directory)
 	if err != nil {
 		return
 	}
 	before := time.Now().Add(-r.Settings.Seconds("media_fetch_timeout_seconds") - r.Settings.Seconds("lease_cleanup_grace_seconds"))
+	var candidates []string
 	for _, f := range files {
-		if f.Type().IsRegular() && strings.HasSuffix(f.Name(), ".part") {
-			info, e := f.Info()
-			if e == nil && info.ModTime().Before(before) {
-				_ = os.Remove(filepath.Join(r.Directory, f.Name()))
-			}
+		if !f.Type().IsRegular() {
+			continue
 		}
-		if f.Type().IsRegular() && strings.HasSuffix(f.Name(), ".media") {
-			info, e := f.Info()
-			if e != nil || !info.ModTime().Before(before) {
-				continue
-			}
-			r.mu.Lock()
-			var count int
-			if r.active[f.Name()] == 0 && r.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM media_file WHERE storage_key=?", f.Name()).Scan(&count) == nil && count == 0 {
-				_ = os.Remove(filepath.Join(r.Directory, f.Name()))
-			}
-			r.mu.Unlock()
+		key := f.Name()
+		if !strings.HasSuffix(key, ".part") && !validStorageKey(key) {
+			continue
+		}
+		info, e := f.Info()
+		if e != nil || !info.ModTime().Before(before) {
+			continue
+		}
+		if strings.HasSuffix(key, ".part") {
+			_ = os.Remove(filepath.Join(r.Directory, key))
+		} else {
+			candidates = append(candidates, key)
 		}
 	}
+	for group := range slices.Chunk(candidates, limit) {
+		r.cleanOrphans(ctx, group)
+	}
+}
+
+type expiredFile struct {
+	id, key string
+	size    int64
+}
+
+func (r *Relay) cleanExpiredFile(ctx context.Context, f expiredFile) {
+	if !r.claimRemoval(f.key) {
+		return
+	}
+	var removedBytes int64
+	defer func() { r.finishRemoval(f.key, removedBytes) }()
+	changed, err := r.DB.ExecContext(ctx, `UPDATE media_file f SET status='deleting',version=version+1 WHERE f.id=? AND f.expires_at<=UTC_TIMESTAMP(3) AND NOT EXISTS (SELECT 1 FROM media_object o WHERE o.file_id=f.id AND o.status='ready' AND o.expires_at>UTC_TIMESTAMP(3))`, f.id)
+	if err != nil {
+		return
+	}
+	if n, err := changed.RowsAffected(); err != nil || n != 1 {
+		return
+	}
+	err = os.Remove(filepath.Join(r.Directory, f.key))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	deleted, err := r.DB.ExecContext(ctx, "DELETE FROM media_file WHERE id=? AND status='deleting'", f.id)
+	if err == nil {
+		if n, err := deleted.RowsAffected(); err == nil && n == 1 {
+			removedBytes = f.size
+		}
+	}
+}
+
+func (r *Relay) cleanOrphans(ctx context.Context, keys []string) {
+	registered, err := r.registeredFiles(ctx, keys)
+	if err != nil {
+		return
+	}
+	var claimed []string
+	for _, key := range keys {
+		if !registered[key] && r.claimRemoval(key) {
+			defer r.finishRemoval(key, 0)
+			claimed = append(claimed, key)
+		}
+	}
+	if len(claimed) == 0 {
+		return
+	}
+	// A publisher could have committed between the first lookup and the claim.
+	registered, err = r.registeredFiles(ctx, claimed)
+	if err != nil {
+		return
+	}
+	for _, key := range claimed {
+		if !registered[key] {
+			_ = os.Remove(filepath.Join(r.Directory, key))
+		}
+	}
+}
+
+func (r *Relay) registeredFiles(ctx context.Context, keys []string) (map[string]bool, error) {
+	args := make([]any, len(keys))
+	for i, key := range keys {
+		args[i] = key
+	}
+	query := fmt.Sprintf("SELECT storage_key FROM media_file WHERE storage_key IN (%s?)", strings.Repeat("?,", len(args)-1))
+	rows, err := r.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	registered := make(map[string]bool, len(args))
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		registered[key] = true
+	}
+	return registered, rows.Err()
 }
