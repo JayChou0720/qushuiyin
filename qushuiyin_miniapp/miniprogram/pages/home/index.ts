@@ -1,9 +1,10 @@
 import { APIError, Candidate, cancelJob, id, loadConfig, queryJob, startParse, wait } from '../../services/api'
+import { takeCleanupNotice } from '../../services/privacy'
 
 const names: Record<string, string> = { douyin: '抖音', xiaohongshu: '小红书', kuaishou: '快手', bilibili: 'B 站' }
 Page({
-  data: { text: '', pasted: false, maxLength: 0, parseWait: 0, inputReady: false, busy: false, error: '', job: '', feedbackTrace: '', sequence: 0, candidates: [] as Candidate[], platforms: [] as { name: string; available: boolean }[] },
-  onLoad() { void this.reloadConfig() },
+  data: { text: '', pasted: false, maxLength: 0, parseWait: 0, inputReady: false, busy: false, error: '', job: '', feedbackTrace: '', cleanupNotice: '', sequence: 0, candidates: [] as Candidate[], platforms: [] as { name: string; available: boolean }[] },
+  onLoad() { this.setData({ cleanupNotice: takeCleanupNotice() }); void this.reloadConfig() },
   onUnload() { void this.cancel() },
   async reloadConfig() {
     try {
@@ -23,7 +24,7 @@ Page({
     if (this.data.busy) return
     if (!this.data.text.trim()) { this.setData({ error: '请粘贴作品分享链接', feedbackTrace: '' }); return }
     const sequence = this.data.sequence + 1, flowId = id()
-    this.setData({ sequence, busy: true, error: '', candidates: [], job: '', feedbackTrace: '' })
+    this.setData({ sequence, busy: true, error: '', candidates: [], job: '', feedbackTrace: '', cleanupNotice: '' })
     try {
       let job = await startParse({ shareText: this.data.text, selectedUrl, source: this.data.pasted ? 'paste' : 'manual', flowId }, id())
       if (this.data.sequence !== sequence) { await cancelJob(job.jobId); return }

@@ -4,4 +4,3 @@
 .platforms { display: flex; flex-wrap: wrap; gap: 8px 16px; }
 .platform { color: #526179; font-size: 14px; }
 .platform.available { color: #236655; }
-.help-link { min-height: 44px; display: flex; align-items: center; }

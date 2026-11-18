@@ -6,4 +6,5 @@
     <navigator class="action-link primary-link" url="/pages/feedback/create" hover-class="button-press">提交反馈</navigator>
     <navigator class="action-link" url="/pages/feedback/list" hover-class="button-press">我的反馈</navigator>
   </view>
+  <navigator class="action-link quiet-link" url="/pages/privacy/index" hover-class="button-press">数据与隐私</navigator>
 </view>

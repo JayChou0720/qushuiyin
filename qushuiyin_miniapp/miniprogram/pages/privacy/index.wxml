@@ -1,0 +1,28 @@
+<view class="screen stack privacy-screen">
+  <text class="title">数据与隐私</text>
+
+  <view class="privacy-section">
+    <text class="section-title">数据如何使用</text>
+    <text class="muted">解析所需信息会发送至服务器处理。最近记录仅保存在本机，当前版本尚未开放记录。</text>
+    <text class="muted">仅在你点击粘贴时读取剪贴板。相册权限用于保存你选择的作品，本地演练不写入相册。</text>
+    <button class="action privacy-action" bindtap="showContract" hover-class="button-press">微信隐私保护指引</button>
+    <text wx:if="{{legalMessage}}" class="muted" role="status">{{legalMessage}}</text>
+    <text class="muted">正式用户协议尚未发布。</text>
+  </view>
+
+  <view class="privacy-section">
+    <text class="section-title">本机数据</text>
+    <text class="muted">仅清理本小程序产生的临时下载文件，不删除相册中的文件，也不影响服务端数据。</text>
+    <button class="action privacy-action" bindtap="clearLocal" disabled="{{busy !== ''}}" loading="{{busy === 'local'}}" hover-class="button-press">清理本机临时文件</button>
+    <text wx:if="{{localMessage}}" class="muted" role="status">{{localMessage}}</text>
+  </view>
+
+  <view class="privacy-section">
+    <text class="section-title">服务端数据</text>
+    <text class="muted">清除解析结果、相关链接、反馈和联系方式，并撤销旧会话和本服务签发的媒体访问凭证。已下载到相册的文件会保留。</text>
+    <button class="action danger privacy-action" bindtap="confirmRemote" disabled="{{busy !== ''}}" loading="{{busy === 'remote'}}" hover-class="button-press">{{busy === 'remote' ? '正在提交清除请求' : '清除服务端数据'}}</button>
+    <text wx:if="{{remoteError}}" class="error" role="alert">{{remoteError}}</text>
+  </view>
+
+  <navigator class="action-link quiet-link" url="/pages/feedback/create" hover-class="button-press">问题反馈</navigator>
+</view>

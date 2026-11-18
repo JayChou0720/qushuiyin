@@ -5,7 +5,8 @@
     "pages/help/index",
     "pages/feedback/create",
     "pages/feedback/list",
-    "pages/feedback/detail"
+    "pages/feedback/detail",
+    "pages/privacy/index"
   ],
   "window": {
     "navigationBarTextStyle": "black",

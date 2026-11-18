@@ -1,0 +1,4 @@
+.privacy-screen { gap: 20px; }
+.privacy-section { display: flex; flex-direction: column; gap: 8px; padding-top: 16px; border-top: 1px solid #e0e6ef; }
+button.privacy-action { min-height: 48px; margin-top: 4px; }
+button.danger { background: #fff1f1; color: #9d2330; font-weight: 650; }
