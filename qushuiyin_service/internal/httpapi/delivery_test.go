@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -205,7 +206,7 @@ func TestDeliveryDirectFallbackMySQL(t *testing.T) {
 	key := auth.ID()
 	reason := dto{"reason": "DIRECT_CONTENT_INVALID"}
 	h.req("POST", path, auth.ID(), dto{"reason": "INVALID"}, 400)
-	h.req("POST", path, key, reason, 202)
+	first := h.req("POST", path, key, reason, 202)
 	h.req("POST", path, key, reason, 202)
 	h.req("POST", path, auth.ID(), reason, 409)
 	if ok, e := h.s.preparePersistentItem(t.Context(), "fallback-worker"); e != nil || !ok {
@@ -214,6 +215,10 @@ func TestDeliveryDirectFallbackMySQL(t *testing.T) {
 	x = h.req("GET", "/v1/save-batches/"+b, "", nil, 200)["items"].([]any)[0].(map[string]any)
 	if x["deliveryMode"] != "relay" || h.gets != 1 {
 		t.Fatal("fallback did not prepare a real relay file", x, h.gets)
+	}
+	h.s.Settings.Data["poll_interval_ms"] = json.RawMessage(`1234`)
+	if replay := h.req("POST", path, key, reason, 202); !reflect.DeepEqual(replay, first) {
+		t.Fatal("fallback replay changed the original acceptance", replay, first)
 	}
 	var issued, falls int
 	if e := h.db.QueryRow("SELECT direct_issued_total,direct_fallback_total FROM download_domain WHERE host=?", h.host).Scan(&issued, &falls); e != nil || issued != 1 || falls != 1 {

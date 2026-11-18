@@ -70,6 +70,7 @@ type meter struct {
 type idem struct {
 	ID, Digest string
 	Expires    time.Time
+	Response   *batchAcceptance
 }
 type dto map[string]any
 type envelope struct {

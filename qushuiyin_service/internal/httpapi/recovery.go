@@ -207,7 +207,13 @@ func (s *Mock) fallbackItem(w http.ResponseWriter, r *http.Request, c credential
 		return
 	}
 	if replay.ID != "" {
-		s.batchAccepted(w, b)
+		if replay.Response == nil {
+			// Older records predate snapshots. Fallback always began by requeuing the item.
+			accepted := s.batchAcceptance(b)
+			accepted.Status = "PREPARING"
+			replay.Response = &accepted
+		}
+		ok(w, 202, replay.Response)
 		return
 	}
 	s.refreshBatch(b, now)
@@ -222,9 +228,11 @@ func (s *Mock) fallbackItem(w http.ResponseWriter, r *http.Request, c credential
 	x.FallbackPending = true
 	s.requeue(b, x, now)
 	b.aggregate()
+	accepted := s.batchAcceptance(b)
 	replay.ID = b.ID
+	replay.Response = &accepted
 	state.keys[key] = replay
-	s.batchAccepted(w, b)
+	ok(w, 202, accepted)
 }
 func (b *batch) findItem(id string) *item {
 	for i := range b.Items {

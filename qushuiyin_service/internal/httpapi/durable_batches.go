@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"slices"
@@ -169,11 +170,17 @@ func (s *Mock) loadBatchRequest(r *http.Request, user string, readOnly bool) (ba
 	key := r.Header.Get("Idempotency-Key")
 	if operation != "" && key != "" && len(key) <= 100 {
 		var rec idem
-		err := s.Sessions.DB.QueryRowContext(ctx, "SELECT payload_hash,object_id,expires_at FROM idempotency_record WHERE user_id=? AND operation=? AND key_value=? AND expires_at>UTC_TIMESTAMP(3)", user, operation, key).Scan(&rec.Digest, &rec.ID, &rec.Expires)
+		var response []byte
+		err := s.Sessions.DB.QueryRowContext(ctx, "SELECT payload_hash,object_id,expires_at,response_json FROM idempotency_record WHERE user_id=? AND operation=? AND key_value=? AND expires_at>UTC_TIMESTAMP(3)", user, operation, key).Scan(&rec.Digest, &rec.ID, &rec.Expires, &response)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return state, err
 		}
 		if err == nil {
+			if response != nil {
+				if err = json.Unmarshal(response, &rec.Response); err != nil {
+					return state, err
+				}
+			}
 			state.replayKey = user + ":" + operation + ":" + key
 			state.keys[state.replayKey] = rec
 			if operation == "prepare" {
@@ -363,7 +370,15 @@ func (s *Mock) saveBatchRequest(ctx context.Context, c credential, state batchRe
 	if newKey {
 		for composite, rec := range state.keys {
 			parts := strings.SplitN(composite, ":", 3)
-			_, err = tx.ExecContext(ctx, "INSERT INTO idempotency_record(id,user_id,operation,key_value,payload_hash,object_type,object_id,expires_at) VALUES (?,?,?,?,?,'save_batch',?,?) ON DUPLICATE KEY UPDATE payload_hash=IF(expires_at<=UTC_TIMESTAMP(3),VALUES(payload_hash),payload_hash),object_id=IF(expires_at<=UTC_TIMESTAMP(3),VALUES(object_id),object_id),expires_at=IF(expires_at<=UTC_TIMESTAMP(3),VALUES(expires_at),expires_at)", auth.ID(), c.User, parts[1], parts[2], rec.Digest, rec.ID, rec.Expires)
+			var response any
+			if rec.Response != nil {
+				raw, err := json.Marshal(rec.Response)
+				if err != nil {
+					return err
+				}
+				response = string(raw)
+			}
+			_, err = tx.ExecContext(ctx, "INSERT INTO idempotency_record(id,user_id,operation,key_value,payload_hash,object_type,object_id,expires_at,response_json) VALUES (?,?,?,?,?,'save_batch',?,?,?) ON DUPLICATE KEY UPDATE payload_hash=IF(expires_at<=UTC_TIMESTAMP(3),VALUES(payload_hash),payload_hash),object_id=IF(expires_at<=UTC_TIMESTAMP(3),VALUES(object_id),object_id),response_json=IF(expires_at<=UTC_TIMESTAMP(3),VALUES(response_json),response_json),expires_at=IF(expires_at<=UTC_TIMESTAMP(3),VALUES(expires_at),expires_at)", auth.ID(), c.User, parts[1], parts[2], rec.Digest, rec.ID, rec.Expires, response)
 			if err != nil {
 				return err
 			}

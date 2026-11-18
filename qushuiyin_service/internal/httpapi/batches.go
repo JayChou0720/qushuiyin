@@ -136,8 +136,20 @@ func minTime(a, b time.Time) time.Time {
 	}
 	return b
 }
+
+type batchAcceptance struct {
+	BatchID     string    `json:"batchId"`
+	Status      string    `json:"status"`
+	PollAfterMs int64     `json:"pollAfterMs"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+}
+
+func (s *Mock) batchAcceptance(b *batch) batchAcceptance {
+	return batchAcceptance{b.ID, b.Status, s.Settings.Int("poll_interval_ms"), b.ExpiresAt}
+}
+
 func (s *Mock) batchAccepted(w http.ResponseWriter, b *batch) {
-	ok(w, 202, dto{"batchId": b.ID, "status": b.Status, "pollAfterMs": s.Settings.Int("poll_interval_ms"), "expiresAt": b.ExpiresAt})
+	ok(w, 202, s.batchAcceptance(b))
 }
 func (state batchRequestState) ownedBatch(w http.ResponseWriter, r *http.Request, c credential) *batch {
 	b := state.batches[r.PathValue("batchId")]
