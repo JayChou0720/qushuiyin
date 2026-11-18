@@ -16,10 +16,10 @@
       <view wx:if="{{previewKind}}" class="stack preview-panel">
         <view class="row spread"><text class="section-title">{{previewKind === 'video' ? '视频预览' : '图片 ' + previewOrder}}</text><button class="action quiet" bindtap="closePreview" hover-class="button-press">关闭预览</button></view>
         <view class="video-frame" wx:if="{{previewKind === 'video' && !previewError}}">
-          <video wx:if="{{previewURL}}" class="preview-video" src="{{previewURL}}" autoplay object-fit="contain" binderror="previewFailed" />
+          <video wx:if="{{previewURL}}" class="preview-video" src="{{previewURL}}" autoplay object-fit="contain" data-generation="{{previewGeneration}}" bindplay="previewShown" bindended="previewEnded" binderror="previewFailed" />
           <text wx:elif="{{previewBusy}}" class="frame-message" aria-live="polite">正在加载预览</text>
         </view>
-        <image wx:if="{{previewKind === 'image' && previewURL}}" class="preview-image" src="{{previewURL}}" mode="widthFix" binderror="previewFailed" aria-label="图片 {{previewOrder}}" />
+        <image wx:if="{{previewKind === 'image' && previewURL}}" class="preview-image" src="{{previewURL}}" mode="widthFix" data-generation="{{previewGeneration}}" bindload="previewShown" binderror="previewFailed" aria-label="图片 {{previewOrder}}" />
         <text wx:if="{{previewKind === 'image' && previewBusy}}" class="muted" aria-live="polite">正在加载预览</text>
         <text wx:if="{{previewError}}" class="error" role="alert">{{previewError}}</text>
       </view>

@@ -10,7 +10,7 @@ export interface HistoryEntry {
   lastSaveSummary: string | null; thumbnailLocalPath: string | null
 }
 interface History { schemaVersion: number; enabled: boolean; entries: HistoryEntry[] }
-interface Seed { resultId: string; userId: string; source?: HistorySource | null }
+interface Seed { resultId: string; userId: string; source?: HistorySource | null; jobId?: string }
 let seed: Seed | undefined
 export function stageHistory(next: Seed) { seed = next }
 export function takeHistory(resultId: string) {

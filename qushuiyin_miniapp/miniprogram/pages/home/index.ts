@@ -32,7 +32,7 @@ Page({
       const result = await parseFlow({ shareText: this.data.text, selectedUrl, source: this.data.pasted ? 'paste' : 'manual', flowId }, this.data.parseWait,
         () => this.data.sequence === sequence, (job, userId) => { this.jobOwner = userId; this.setData({ job }) })
       if (!result || this.data.sequence !== sequence) return
-      if (result.source) stageHistory({ ...result, source: result.source })
+      stageHistory(result)
       wx.navigateTo({ url: '/pages/result/index?resultId=' + encodeURIComponent(result.resultId) + '&flowId=' + encodeURIComponent(flowId) })
     } catch (error) {
       if (this.data.sequence !== sequence) return

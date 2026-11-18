@@ -41,7 +41,10 @@ node ./qushuiyin_service/scripts/smoke-mock.mjs
 $historyBuild = Join-Path $env:TEMP ('qsy-history-' + [guid]::NewGuid().ToString('N'))
 tsc --outDir $historyBuild --rootDir miniprogram
 node ./scripts/smoke-history.cjs $historyBuild 18080
+node ./scripts/smoke-events.cjs $historyBuild 18080
 ```
+
+事件回归复用相同的临时编译目录，覆盖离线暂存、批量补传、丢失回执后的退避和去重，以及清除当前身份的待传队列。Mock 下载产生下载与保存动作汇总事件，相册结果事件留给真实相册回调。
 
 ## M0：能力验证
 

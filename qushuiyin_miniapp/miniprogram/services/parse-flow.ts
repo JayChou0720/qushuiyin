@@ -29,5 +29,5 @@ export async function parseFlow(input: Input, waitSeconds: number, active: () =>
   if (job.status !== 'SUCCEEDED' || !job.resultId) {
     throw new ParseFailure(job.error?.code || '', job.error?.message || '未能取得解析结果', job.error?.traceId || '')
   }
-  return { resultId: job.resultId, source: job.historySource, userId }
+  return { resultId: job.resultId, source: job.historySource, userId, jobId: job.jobId }
 }

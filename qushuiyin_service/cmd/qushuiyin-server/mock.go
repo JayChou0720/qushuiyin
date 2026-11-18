@@ -99,8 +99,11 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 		return err
 	}
 	mock.Admin = auth.AdminStore{DB: db, Key: key, TTL: settings.Seconds("admin_session_ttl_seconds"), MaxFailures: settings.Int("admin_login_max_failures"), Lockout: settings.Seconds("admin_lockout_seconds")}
-	if err := settings.Validate("feedback_min_chars", "feedback_max_chars", "feedback_contact_max_chars", "feedback_retention_days", "feedback_closed_retention_days", "user_feedback_per_day", "pagination_default", "pagination_max", "client_queue_max", "event_batch_max", "client_event_retention_hours", "diagnostic_retention_days", "cleanup_completion_hours", "admin_audit_retention_days"); err != nil {
+	if err := settings.Validate("feedback_min_chars", "feedback_max_chars", "feedback_contact_max_chars", "feedback_retention_days", "feedback_closed_retention_days", "user_feedback_per_day", "pagination_default", "pagination_max", "client_queue_max", "event_batch_max", "client_event_retention_hours", "client_event_retry_initial_seconds", "client_event_retry_max_seconds", "diagnostic_retention_days", "cleanup_completion_hours", "admin_audit_retention_days"); err != nil {
 		return err
+	}
+	if settings.Int("client_event_retry_max_seconds") < settings.Int("client_event_retry_initial_seconds") || settings.Int("client_event_retry_max_seconds")/3600 >= settings.Int("client_event_retention_hours") {
+		return errors.New("invalid client event retry window")
 	}
 	mock.AdminHost = getenv("ADMIN_PUBLIC_HOST")
 	if mock.AdminHost == "" {

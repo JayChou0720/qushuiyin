@@ -2,6 +2,9 @@ import { releaseTemporaryMedia } from './media-cache'
 
 const LOCAL_ORIGIN = 'http://127.0.0.1:18080'
 const mockIdentityKey = 'mock-dev-user'
+export const clientVersion = 'm1'
+
+export interface EventLimits { event_batch_max: number; client_queue_max: number; client_event_retention_hours: number; client_event_retry_initial_seconds: number; client_event_retry_max_seconds: number }
 
 type Method = 'GET' | 'POST' | 'DELETE'
 interface Envelope<T> { code: string; message: string; requestId: string; data: T; error?: { details?: { candidates?: Candidate[] } } }
@@ -9,7 +12,7 @@ export interface Candidate { url: string; displayHost: string; platform: string 
 export interface PublicConfig {
   privacyVersion: string
   features: { mock: boolean; devLogin: boolean }
-  limits: { max_share_text_chars: number; max_image_batch_count: number; client_parse_wait_seconds: number; client_download_timeout_seconds: number; poll_interval_ms: number; feedback_min_chars: number; feedback_max_chars: number; feedback_contact_max_chars: number; history_max_count: number; history_ttl_days: number; thumbnail_local_budget_bytes: number }
+  limits: EventLimits & { max_share_text_chars: number; max_image_batch_count: number; client_parse_wait_seconds: number; client_download_timeout_seconds: number; poll_interval_ms: number; feedback_min_chars: number; feedback_max_chars: number; feedback_contact_max_chars: number; history_max_count: number; history_ttl_days: number; thumbnail_local_budget_bytes: number }
   platforms: { platform: string; status: string; videoEnabled: boolean; imageEnabled: boolean }[]
 }
 interface Session { userId: string; token: string; expiresAt: string }
@@ -66,6 +69,7 @@ export async function loadConfig() {
   return cached
 }
 export const feedbackConfig = () => cached ? Promise.resolve(cached) : loadConfig()
+export const cachedEventLimits = () => cached?.limits
 async function login(allowNew = true): Promise<Session> {
   if (session && Date.parse(session.expiresAt) > Date.now()) return session
   if (!loggingIn) {
@@ -79,7 +83,7 @@ async function login(allowNew = true): Promise<Session> {
         name = 'device-' + id()
         wx.setStorageSync(mockIdentityKey, name)
       }
-      const next = await call<Session>('POST', '/v1/sessions/wechat', { code: 'dev:' + name, clientVersion: 'm1', privacyVersion: config.privacyVersion })
+      const next = await call<Session>('POST', '/v1/sessions/wechat', { code: 'dev:' + name, clientVersion, privacyVersion: config.privacyVersion })
       if (epoch !== identityEpoch) throw new Error('使用身份已变更，请重新操作')
       session = next
       return next
@@ -87,7 +91,7 @@ async function login(allowNew = true): Promise<Session> {
   }
   return loggingIn
 }
-async function authenticatedRequest<T>(method: Method, path: string, data?: object, key?: string, owner?: string) {
+async function authenticatedRequest<T>(method: Method, path: string, data?: object, key?: string, owner?: string, allowNew = true) {
   const epoch = identityEpoch
   const verifyIdentity = () => {
     if (deleting || epoch !== identityEpoch) throw new Error('正在清除数据或使用身份已变更，请重新操作')
@@ -100,23 +104,24 @@ async function authenticatedRequest<T>(method: Method, path: string, data?: obje
     verifyIdentity()
     return { data: response, userId: credential.userId }
   }
-  const credential = await login()
+  const credential = await login(allowNew)
   try { return await send(credential) } catch (e) {
     if (!(e instanceof APIError) || e.code !== 'SESSION_EXPIRED') throw e
     verifyIdentity()
     if (session === credential) session = undefined
-    return send(await login())
+    return send(await login(allowNew))
   }
 }
 async function request<T>(method: Method, path: string, data?: object, key?: string, owner?: string) {
   return (await authenticatedRequest<T>(method, path, data, key, owner)).data
 }
 export const isCurrentUser = (userId: string) => !deleting && session?.userId === userId && Date.parse(session.expiresAt) > Date.now()
+export const isKnownUser = (userId: string) => !deleting && session?.userId === userId
 export function hasHistoryIdentity() {
   if (session) return true
   try { return !!wx.getStorageSync(mockIdentityKey) } catch { return false }
 }
-export async function confirmHistoryIdentity(allowNew = true) {
+export async function confirmUserIdentity(allowNew = true) {
   const epoch = identityEpoch
   if (deleting) throw new Error('正在清除数据，请稍后再试')
   const { userId } = await login(allowNew)
@@ -149,6 +154,11 @@ export const startParse = (input: Input, key: string, owner?: string) => authent
 export const queryJob = (jobId: string, owner: string) => request<Job>('GET', '/v1/parse-jobs/' + encodeURIComponent(jobId), undefined, undefined, owner)
 export const cancelJob = (jobId: string, owner: string) => request<Job>('DELETE', '/v1/parse-jobs/' + encodeURIComponent(jobId), undefined, undefined, owner)
 export const queryResult = (resultId: string, owner?: string) => request<Result>('GET', '/v1/results/' + encodeURIComponent(resultId), undefined, undefined, owner)
+export const queryOwnedResult = (resultId: string, owner?: string) => authenticatedRequest<Result>('GET', '/v1/results/' + encodeURIComponent(resultId), undefined, undefined, owner)
+interface EventReceipt { acceptedEventIds: string[]; duplicateEventIds: string[]; rejected: { eventId: string | null; code: string }[] }
+export async function reportClientEvents(events: readonly object[], owner: string) {
+  return (await authenticatedRequest<EventReceipt>('POST', '/v1/events', { events }, undefined, owner, false)).data
+}
 export const submitFeedback = (data: FeedbackRequest, key: string) => request<FeedbackCreated>('POST', '/v1/feedbacks', data, key)
 export const queryFeedback = (feedbackId: string) => request<FeedbackDetail>('GET', '/v1/feedbacks/' + encodeURIComponent(feedbackId))
 export const listFeedback = (cursor: string, owner: string) => authenticatedRequest<FeedbackPage>('GET', '/v1/feedbacks' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''), undefined, undefined, owner)
@@ -174,14 +184,18 @@ export async function copyDownloadURL(batchId: string, itemId: string) {
   return url
 }
 export class DirectRejected extends Error {}
-export function downloadSample(ticket: DownloadTicket, timeout: number, attach: (task: WechatMiniprogram.DownloadTask) => void): Promise<void> {
+export function downloadSample(ticket: DownloadTicket, timeout: number, attach: (task: WechatMiniprogram.DownloadTask) => void): Promise<number | null> {
   return new Promise((resolve, reject) => {
     const direct = ticket.deliveryMode === 'direct'
     if (!ticket.url.startsWith(origin() + (direct ? '/media/mock-source/direct/' : '/media/download/'))) { reject(new Error('下载地址无效')); return }
     const task = wx.downloadFile({ url: ticket.url, timeout,
       success(res) {
+        let bytes: number | null = null
+        if (res.statusCode === 200 && res.tempFilePath) {
+          try { bytes = (wx.getFileSystemManager().statSync(res.tempFilePath) as WechatMiniprogram.Stats).size } catch { /* Client size is optional. */ }
+        }
         if (res.tempFilePath) void releaseTemporaryMedia(res.tempFilePath)
-        if (res.statusCode === 200 && res.tempFilePath) resolve()
+        if (res.statusCode === 200 && res.tempFilePath) resolve(bytes)
         else if (direct && res.statusCode === 403) reject(new DirectRejected())
         else reject(new Error('样本下载失败，请重试'))
       },

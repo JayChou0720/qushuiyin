@@ -1,6 +1,6 @@
 import { clearMediaCache } from '../../services/media-cache'
 import { clearServiceData, openPrivacyContract } from '../../services/privacy'
-import { confirmHistoryIdentity, hasHistoryIdentity, isCurrentUser, loadConfig, PublicConfig } from '../../services/api'
+import { confirmUserIdentity, hasHistoryIdentity, isCurrentUser, loadConfig, PublicConfig } from '../../services/api'
 import { clearHistoryThumbnails, loadHistory, setHistoryEnabled } from '../../services/history'
 
 Page({
@@ -15,7 +15,7 @@ Page({
     this.historyOwner = ''
     this.setData({ busy: 'history', historyReady: false, historyMessage: '' })
     try {
-      const [owner, config] = await Promise.all([confirmHistoryIdentity(allowNew), loadConfig()])
+      const [owner, config] = await Promise.all([confirmUserIdentity(allowNew), loadConfig()])
       if (this.disposed || !isCurrentUser(owner)) return
       this.historyOwner = owner; this.limits = config.limits
       this.setData({ historyReady: true, historyEnabled: loadHistory(owner, config.limits).enabled })

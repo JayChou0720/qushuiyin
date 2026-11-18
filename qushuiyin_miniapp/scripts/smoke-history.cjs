@@ -41,7 +41,7 @@ global.wx = {
 
 async function run() {
   const api = client('services/api.js'), history = client('services/history.js')
-  const owner = await api.confirmHistoryIdentity()
+  const owner = await api.confirmUserIdentity()
   const limits = (await api.loadConfig()).limits
   const source = 'https://www.xiaohongshu.com/explore/10002?signature=x%2By&token=a%3Db'
   const parse = async (url = source) => {
@@ -135,7 +135,7 @@ async function run() {
   await client('services/privacy.js').clearServiceData()
   assert.equal(storage.has(storageKey), false)
   assert.equal(storage.get('unrelated'), 'keep')
-  assert.notEqual(await api.confirmHistoryIdentity(), owner)
+  assert.notEqual(await api.confirmUserIdentity(), owner)
   console.log('Mini-program history smoke passed: reuse, replay, retention, privacy, quota, and scoped cleanup.')
 }
 
