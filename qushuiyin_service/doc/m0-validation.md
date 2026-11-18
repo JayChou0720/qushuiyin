@@ -1,6 +1,6 @@
 # M0 能力验证表
 
-已完成四平台首轮真实探测。抖音、小红书用本地样本完成 JPEG 优先和魔数识别复测。**授权样本矩阵和真机验证待完成**。抖音最新复测用 `douyin-h5-iteminfo-v2`，其余平台用解析库提交 `00e8e118c7c52e287b6b06858639ee86aab0579c`。
+已完成四平台首轮真实探测。抖音的 JPEG 优先复测使用 `douyin-h5-iteminfo-v2`，iPhone Safari 短链复测使用 `douyin-h5-iteminfo-v3`。其余平台用解析库提交 `00e8e118c7c52e287b6b06858639ee86aab0579c`。**抖音短链稳定性、授权样本矩阵和真机验证待完成**。
 
 | 平台 | 视频 | 静态图集 | 封面 | 文案 |
 | --- | --- | --- | --- | --- |
@@ -33,6 +33,15 @@
 | 8 抖音图集 | 探测到 18 张 JPEG 和 WebP 封面。`imagesAndVideo=true` | 短链终点曾返回 HEAD 444，但已取得作品 ID。独立的 H5 iteminfo 成功运行，也曾出现 `UPSTREAM_UNAVAILABLE`。JPEG 域名未登记 |
 | 12 抖音图集（DY-G1） | 与上一版相同作品的 9 张正文图由 WebP 改选为 JPEG，封面仍为 WebP。`imagesAndVideo=true` | JPEG 域名未登记，WebP 封面需走转换 |
 | 3 B 站第 1P | 响应声明 `application/octet-stream`，读文件头识别为 MP4。封面仍为 PNG | 视频按 `RELAY_ONLY` 处理，中转待测 |
+
+2026-11-18 北京时间 18:27 至 18:28，Windows CLI 用 `douyin-h5-iteminfo-v3` 对同一文件的两条抖音短链各连续执行 12 次 `probe`。
+
+| 样本 | 解析成功 | `UPSTREAM_UNAVAILABLE` |
+| --- | --- | --- |
+| 7 抖音视频短链 | 0 / 12 | 12 |
+| 8 抖音图集短链 | 0 / 12 | 12 |
+
+诊断中两条短链均取得作品 ID。上游以 HTTP 200 返回验证页面，缺少 `xsstoken` 与 `webId`，重新请求一次仍缺字段。北京时间 18:30 对两条短链各补跑一次，结果相同。本轮稳定性验收未通过。
 
 | 最终 CDN 主机 | 平台 | 观测数 / MIME | 登记状态 | iOS / Android 下载、预览与保存结论 |
 | --- | --- | --- | --- | --- |

@@ -59,7 +59,7 @@ func TestDouyinH5VideoAndGallery(t *testing.T) {
 				case req.URL.Host == "www.douyin.com" && req.Method == http.MethodHead:
 					return h5Response(444, ""), nil
 				case req.URL.String() == pageURL && req.Method == http.MethodGet:
-					if req.Header.Get("Cookie") != "" || req.Header.Get("Referer") != "" || !strings.Contains(req.UserAgent(), "Mobile") {
+					if req.Header.Get("Cookie") != "" || req.Header.Get("Referer") != "" || req.UserAgent() != parser.DefaultUserAgent {
 						t.Fatal("unexpected sharing-page headers")
 					}
 					resp := h5Response(200, shareFixture)
@@ -74,7 +74,7 @@ func TestDouyinH5VideoAndGallery(t *testing.T) {
 					if run == 0 {
 						wantCookie = "ttwid=fixture-session"
 					}
-					if req.Header.Get("Cookie") != wantCookie || req.Referer() != pageURL || !strings.Contains(req.UserAgent(), "Mobile") {
+					if req.Header.Get("Cookie") != wantCookie || req.Referer() != pageURL || req.UserAgent() != parser.DefaultUserAgent {
 						t.Fatal("unexpected iteminfo headers")
 					}
 					q := req.URL.Query()
@@ -133,7 +133,7 @@ func TestDouyinH5RejectsInvalidUpstream(t *testing.T) {
 	}{
 		{"short without ID", "", "", "", true, 1, Unavailable},
 		{"short redirects off platform", "", "", "https://douyin.com.example.test/video/123", true, 1, Unavailable},
-		{"missing attributes", `<body>`, "", "", false, 1, Unavailable},
+		{"missing attributes", `<body>`, "", "", false, 2, Unavailable},
 		{"item redirects off origin", shareFixture, "", "https://www.douyin.com/video/123", false, 2, Unavailable},
 		{"item redirects to other path", shareFixture, "", shareOrigin + "/other", false, 2, Unavailable},
 		{"item redirects to HTTP", shareFixture, "", "http://www.iesdouyin.com" + itemPath, false, 2, Unavailable},
@@ -164,6 +164,49 @@ func TestDouyinH5RejectsInvalidUpstream(t *testing.T) {
 			}
 			if _, err := a.Parse(t.Context(), input); err != test.want || calls != test.requests {
 				t.Fatalf("got %v in %d requests, want %v in %d", err, calls, test.want, test.requests)
+			}
+		})
+	}
+}
+
+func TestDouyinH5RetriesIncompleteSharePage(t *testing.T) {
+	const pageURL = shareOrigin + "/share/video/123/"
+	for _, test := range []struct{ name, firstPage string }{
+		{"missing token", strings.Replace(shareFixture, `xsstoken="fake&amp;token"`, "", 1)},
+		{"short web ID", strings.Replace(shareFixture, "0123456789abcdef000", "0123456789abcde", 1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var pages, items int
+			a := liveDouyinFixture(t, func(req *http.Request) (*http.Response, error) {
+				if req.Method != http.MethodGet || req.UserAgent() != parser.DefaultUserAgent {
+					t.Fatal("expected an H5 GET with the configured Safari user agent")
+				}
+				switch {
+				case req.URL.String() == pageURL:
+					pages++
+					if pages == 1 {
+						resp := h5Response(200, test.firstPage)
+						resp.Header.Add("Set-Cookie", "ttwid=fixture-session; Path=/; Secure")
+						resp.Header.Add("Set-Cookie", "sessionid=fixture-login; Path=/; Secure")
+						return resp, nil
+					}
+					if pages != 2 || req.Header.Get("Cookie") != "ttwid=fixture-session" {
+						t.Fatal("unexpected share retry or cookies")
+					}
+					return h5Response(200, shareFixture), nil
+				case req.URL.Path == itemPath:
+					items++
+					if pages != 2 || items != 1 || req.URL.Query().Get("web_id") != "0123456789abcdef000" {
+						t.Fatal("iteminfo must use the second share page")
+					}
+					return h5Response(200, `{"status_code":0,"item_list":[{"aweme_id":"123","video":{"play_addr":{"url_list":["https://cdn.example.test/v.mp4"]}}}]}`), nil
+				default:
+					t.Fatal("unexpected request")
+					return nil, nil
+				}
+			})
+			if _, err := a.Parse(t.Context(), "https://www.douyin.com/video/123"); err != nil || pages != 2 || items != 1 {
+				t.Fatalf("parse: %v, share requests: %d, iteminfo requests: %d", err, pages, items)
 			}
 		})
 	}

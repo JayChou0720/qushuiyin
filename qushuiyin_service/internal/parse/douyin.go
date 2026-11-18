@@ -22,8 +22,7 @@ import (
 
 const shareOrigin = "https://www.iesdouyin.com"
 const itemPath = "/web/api/v2/aweme/iteminfo/"
-const mobileUA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
-const DouyinH5Version = "douyin-h5-iteminfo-v2"
+const DouyinH5Version = "douyin-h5-iteminfo-v3"
 
 // Same maximum response size as the pinned parser (§12.1).
 const h5MaxBytes = 16 << 20
@@ -118,7 +117,7 @@ func shareGet(ctx context.Context, c outbound.Client, jar http.CookieJar, raw, r
 		if err != nil {
 			return nil, Unavailable
 		}
-		req.Header.Set("User-Agent", mobileUA)
+		req.Header.Set("User-Agent", parser.DefaultUserAgent)
 		if u.Hostname() == "www.iesdouyin.com" {
 			if referer != "" {
 				req.Header.Set("Referer", referer)
@@ -171,19 +170,22 @@ func douyinItem(ctx context.Context, c outbound.Client, work string) (*h5Item, e
 		return nil, Unavailable
 	}
 	page := shareOrigin + "/share/video/" + work + "/"
-	body, err := shareGet(ctx, c, jar, page, "")
-	if err != nil {
-		return nil, err
+	for attempt := 0; attempt < 2; attempt++ {
+		body, err := shareGet(ctx, c, jar, page, "")
+		if err != nil {
+			return nil, err
+		}
+		q, err := readSharePage(body).params(work)
+		if err != nil {
+			continue
+		}
+		body, err = shareGet(ctx, c, jar, shareOrigin+itemPath+"?"+q.Encode(), page)
+		if err != nil {
+			return nil, err
+		}
+		return parseItem(body, work)
 	}
-	q, err := readSharePage(body).params(work)
-	if err != nil {
-		return nil, err
-	}
-	body, err = shareGet(ctx, c, jar, shareOrigin+itemPath+"?"+q.Encode(), page)
-	if err != nil {
-		return nil, err
-	}
-	return parseItem(body, work)
+	return nil, Unavailable
 }
 
 type h5URLs struct {
