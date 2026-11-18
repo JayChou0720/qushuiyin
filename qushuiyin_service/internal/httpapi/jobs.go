@@ -21,6 +21,7 @@ type jobRequest struct {
 }
 type job struct {
 	ID, User, Platform, ResultID, Failure, Status string
+	FlowID                                        string
 	Created, Deadline, Expires                    time.Time
 	Pending                                       *result
 }
@@ -138,7 +139,7 @@ func (s *Mock) createJob(w http.ResponseWriter, r *http.Request, c credential) {
 		fail(w, 429, "RATE_LIMITED")
 		return
 	}
-	j := &job{ID: auth.ID(), User: c.User, Platform: p, Status: "QUEUED", Created: now, Deadline: now.Add(s.Settings.Seconds("parse_job_timeout_seconds")), Expires: now.Add(s.Settings.Seconds("result_ttl_seconds"))}
+	j := &job{ID: auth.ID(), User: c.User, Platform: p, FlowID: req.FlowID, Status: "QUEUED", Created: now, Deadline: now.Add(s.Settings.Seconds("parse_job_timeout_seconds")), Expires: now.Add(s.Settings.Seconds("result_ttl_seconds"))}
 	parsed, e := s.Adapter.Parse(r.Context(), selected)
 	if e != nil {
 		j.Failure = parseError(e)
@@ -193,7 +194,9 @@ func (s *Mock) jobStatus(w http.ResponseWriter, r *http.Request, c credential) {
 	}
 	var e, id any
 	if j.Failure != "" {
-		e = issue(j.Failure)
+		failure := issue(j.Failure)
+		failure["traceId"] = j.ID
+		e = failure
 	}
 	if j.ResultID != "" {
 		id = j.ResultID

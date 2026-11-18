@@ -15,6 +15,7 @@ import (
 
 type batch struct {
 	ID, User, ResultID, ClientActionID, Status string
+	FlowID                                     string
 	ExpiresAt                                  time.Time
 	Items                                      []item
 	Cancelled                                  bool
@@ -93,7 +94,7 @@ func (s *Mock) createBatch(w http.ResponseWriter, r *http.Request, c credential)
 	if res.Cover != nil {
 		pool[res.Cover.ID] = *res.Cover
 	}
-	b := &batch{ID: auth.ID(), User: c.User, ResultID: res.ID, ClientActionID: req.ClientActionID, Status: "PREPARING", ExpiresAt: minTime(res.ExpiresAt, now.Add(s.Settings.Seconds("batch_ttl_seconds")))}
+	b := &batch{ID: auth.ID(), User: c.User, ResultID: res.ID, ClientActionID: req.ClientActionID, FlowID: req.FlowID, Status: "PREPARING", ExpiresAt: minTime(res.ExpiresAt, now.Add(s.Settings.Seconds("batch_ttl_seconds")))}
 	for _, id := range req.AssetIDs {
 		a, ok := pool[id]
 		if !ok {

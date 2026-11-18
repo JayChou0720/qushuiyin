@@ -11,6 +11,9 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/go-sql-driver/mysql"
 
 	"qushuiyin/service/internal/auth"
 	"qushuiyin/service/internal/config"
@@ -40,7 +43,13 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 	if dsn == "" {
 		return errors.New("MYSQL_DSN required")
 	}
-	db, e := sql.Open("mysql", dsn)
+	database, e := mysql.ParseDSN(dsn)
+	if e != nil {
+		return errors.New("invalid database configuration")
+	}
+	database.ParseTime = true
+	database.Loc = time.UTC
+	db, e := sql.Open("mysql", database.FormatDSN())
 	if e != nil {
 		return errors.New("invalid database configuration")
 	}
@@ -90,6 +99,9 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 		return err
 	}
 	mock.Admin = auth.AdminStore{DB: db, Key: key, TTL: settings.Seconds("admin_session_ttl_seconds"), MaxFailures: settings.Int("admin_login_max_failures"), Lockout: settings.Seconds("admin_lockout_seconds")}
+	if err := settings.Validate("feedback_min_chars", "feedback_max_chars", "feedback_contact_max_chars", "feedback_retention_days", "user_feedback_per_day", "pagination_default", "pagination_max", "client_queue_max", "event_batch_max", "client_event_retention_hours", "diagnostic_retention_days", "cleanup_completion_hours"); err != nil {
+		return err
+	}
 	mock.AdminHost = getenv("ADMIN_PUBLIC_HOST")
 	if mock.AdminHost == "" {
 		mock.AdminHost = addr

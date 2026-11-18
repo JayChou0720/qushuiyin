@@ -177,8 +177,50 @@ await request('DELETE','/v1/sessions/current',{token})
 }
 await checkRecovery((await createSession()).token)
 
-await request('DELETE','/v1/sessions/current',{token})
+const feedbackPath = '/v1/feedbacks'
+const feedback = {category:'parse_failed',content:'本地反馈接口验收',contact:'mock-feedback@example.invalid',traceId:bad.error.traceId,includeSource:false}
+await request('POST',feedbackPath,{token,data:{...feedback,sourceUrl:video},key:randomUUID(),expect:400,code:'BAD_REQUEST'})
+await request('POST',feedbackPath,{token:other,data:feedback,key:randomUUID(),expect:404,code:'RESOURCE_NOT_FOUND'})
+const feedbackKey = randomUUID()
+const submitted = await request('POST',feedbackPath,{token,data:feedback,key:feedbackKey,expect:201})
+assert.deepEqual(await request('POST',feedbackPath,{token,data:feedback,key:feedbackKey,expect:201}),submitted)
+await request('POST',feedbackPath,{token,data:{...feedback,content:'与首次不同的反馈'},key:feedbackKey,expect:409,code:'IDEMPOTENCY_CONFLICT'})
+const detailPath = feedbackPath+'/'+submitted.feedbackId
+const detail = await request('GET',detailPath,{token})
+assert.equal(detail.content,feedback.content)
+assert.equal(detail.contact,'***')
+assert.equal('sourceUrl' in detail,false)
+await request('GET',detailPath,{token:other,expect:404,code:'RESOURCE_NOT_FOUND'})
+assert.deepEqual((await request('GET',feedbackPath,{token:other})).items,[])
+await request('POST',feedbackPath,{token,data:{...feedback,includeSource:true,sourceUrl:video},key:randomUUID(),expect:201})
+const page = await request('GET',feedbackPath+'?limit=1',{token})
+assert.equal(page.hasMore,true)
+const next = await request('GET',feedbackPath+'?limit=1&cursor='+page.nextCursor,{token})
+assert.equal(next.hasMore,false)
+assert.notEqual(page.items[0].id,next.items[0].id)
+
+const e = {eventId:randomUUID(),name:'result_viewed',flowId:original.flowId,jobId:first.jobId,stage:'result',outcome:'succeeded',clientTime:new Date(),clientVersion:'smoke',osFamily:'devtools'}
+const event = (value,owner=token) => request('POST','/v1/events',{token:owner,data:{events:[value]}})
+const impersonated = {...e,eventId:randomUUID(),name:'parse_job_finished'}
+const privateField = {...e,eventId:randomUUID(),sourceUrl:video}
+const mixed = await request('POST','/v1/events',{token,data:{events:[e,e,impersonated,privateField]}})
+assert.deepEqual(mixed.acceptedEventIds,[e.eventId])
+assert.deepEqual(mixed.duplicateEventIds,[e.eventId])
+assert.deepEqual(mixed.rejected,[impersonated,privateField].map(x=>({eventId:x.eventId,code:'BAD_REQUEST'})))
+assert.deepEqual((await event(e,other)).rejected,[{eventId:e.eventId,code:'RESOURCE_NOT_FOUND'}])
+
+const dataPath='/v1/me/data'
+await request('DELETE',dataPath,{expect:401,code:'AUTH_REQUIRED'})
+const cleanup=await request('DELETE',dataPath,{token})
+assert.equal(cleanup.accessRevoked,true)
+assert.equal(cleanup.cleanupStatus,'scheduled')
+assert.ok(Date.parse(cleanup.cleanupDeadlineAt)>Date.now())
+await request('DELETE',dataPath,{token,expect:401,code:'SESSION_EXPIRED'})
+await request('GET',detailPath,{token,expect:401,code:'SESSION_EXPIRED'})
+await request('GET',feedbackPath,{token:other})
+await request('DELETE',dataPath,{token:other})
+
 assert.equal((await fetch(picTickets.tickets[0].url)).status,403)
-assert.equal((await fetch(preview.url)).status,403)
+assert.equal((await fetch(preview.url)).status,410)
 await request('GET',jobPath(first),{token,expect:401,code:'SESSION_EXPIRED'})
-console.log('Mock API smoke passed: video, gallery, previews, retry, fallback, copy link, owner isolation, admin guards, idempotency and ticket revocation.')
+console.log('Mock API smoke passed: media, recovery, owner isolation, admin guards, feedback, events, data cleanup and ticket revocation.')

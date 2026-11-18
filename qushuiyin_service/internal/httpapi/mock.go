@@ -39,6 +39,7 @@ type Mock struct {
 	Platforms      []Platform
 	Origin         string
 	DevLogin       bool
+	lifecycle      sync.RWMutex
 	mu             sync.Mutex
 	jobs           map[string]*job
 	results        map[string]*result
@@ -75,6 +76,8 @@ func issue(code string) dto {
 }
 func messageFor(code string) string {
 	switch code {
+	case "DAILY_LIMIT_REACHED":
+		return "今日操作次数已达上限，请稍后再试"
 	case "PREPARE_TIMEOUT":
 		return "文件准备超时"
 	case "MEDIA_SOURCE_EXPIRED":
@@ -202,7 +205,7 @@ func (s *Mock) login(w http.ResponseWriter, r *http.Request) {
 	ok(w, 200, sess)
 }
 func (s *Mock) publicConfig(w http.ResponseWriter, r *http.Request) {
-	keys := []string{"max_share_text_chars", "max_candidate_urls", "max_image_batch_count", "client_parse_wait_seconds", "poll_interval_ms", "client_download_timeout_seconds", "max_video_bytes", "max_image_bytes"}
+	keys := []string{"max_share_text_chars", "max_candidate_urls", "max_image_batch_count", "client_parse_wait_seconds", "poll_interval_ms", "client_download_timeout_seconds", "max_video_bytes", "max_image_bytes", "feedback_min_chars", "feedback_max_chars", "feedback_contact_max_chars", "pagination_default", "pagination_max", "event_batch_max", "client_queue_max", "client_event_retention_hours"}
 	limits := map[string]json.RawMessage{}
 	for _, k := range keys {
 		limits[k] = s.Settings.Data[k]
@@ -251,6 +254,11 @@ func (s *Mock) Handler() http.Handler {
 	m.HandleFunc("POST /v1/save-batches/{batchId}/retry", s.authorized(s.retryBatch))
 	m.HandleFunc("POST /v1/save-batches/{batchId}/items/{itemId}/fallback", s.authorized(s.fallbackItem))
 	m.HandleFunc("POST /v1/save-batches/{batchId}/items/{itemId}/copy-link", s.authorized(s.copyLink))
+	m.HandleFunc("POST /v1/feedbacks", s.authorized(s.submitFeedback))
+	m.HandleFunc("GET /v1/feedbacks", s.authorized(s.feedbackList))
+	m.HandleFunc("GET /v1/feedbacks/{feedbackId}", s.authorized(s.feedbackDetail))
+	m.HandleFunc("POST /v1/events", s.authorized(s.ingestEvents))
+	m.HandleFunc("DELETE /v1/me/data", s.authorized(s.deleteData))
 	m.HandleFunc("GET /media/download/{mediaObjectId}", s.download("relay"))
 	m.HandleFunc("GET /media/mock-source/direct/{mediaObjectId}", s.download("direct"))
 	m.HandleFunc("GET /media/mock-source/copy/{mediaObjectId}", s.download("copy"))
@@ -258,7 +266,17 @@ func (s *Mock) Handler() http.Handler {
 	m.HandleFunc("GET /media/thumbnail/{previewId}", s.previewMedia("thumbnail"))
 	m.HandleFunc("GET /media/image/{previewId}", s.previewMedia("thumbnail"))
 	m.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { fail(w, 404, "RESOURCE_NOT_FOUND") })
-	return m
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Keep a request authenticated just before deletion from repopulating the mock store.
+		if r.Method == http.MethodDelete && r.URL.Path == "/v1/me/data" {
+			s.lifecycle.Lock()
+			defer s.lifecycle.Unlock()
+		} else {
+			s.lifecycle.RLock()
+			defer s.lifecycle.RUnlock()
+		}
+		m.ServeHTTP(w, r)
+	})
 }
 func (s *Mock) prune(now time.Time) {
 	for k, x := range s.previews {
@@ -319,6 +337,7 @@ func parseError(err error) string {
 	return "UPSTREAM_UNAVAILABLE"
 }
 func (s *Mock) Clean(ctx context.Context) {
+	s.cleanDatabase(ctx, time.Now().UTC())
 	ticker := time.NewTicker(s.Settings.Seconds("media_gc_interval_seconds"))
 	defer ticker.Stop()
 	for {
@@ -329,6 +348,7 @@ func (s *Mock) Clean(ctx context.Context) {
 			s.mu.Lock()
 			s.prune(now)
 			s.mu.Unlock()
+			s.cleanDatabase(ctx, now.UTC())
 		}
 	}
 }
