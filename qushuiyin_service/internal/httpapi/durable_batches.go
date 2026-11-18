@@ -293,51 +293,76 @@ func (s *Mock) preparePersistentItem(ctx context.Context, owner string) (bool, e
 	defer tx.Rollback()
 	var bid, iid, user, enc string
 	var seq uint64
-	err = tx.QueryRowContext(ctx, `SELECT i.id,i.batch_id,i.user_id,i.claim_seq FROM save_batch_item i JOIN save_batch b ON b.id=i.batch_id JOIN parse_result p ON p.id=b.result_id JOIN app_user u ON u.id=i.user_id WHERE u.status='active' AND p.adapter_version=? AND b.cancel_requested=FALSE AND b.expires_at>UTC_TIMESTAMP(3) AND i.prepare_status IN ('PENDING','PREPARING') AND (i.lease_expires_at IS NULL OR i.lease_expires_at<=UTC_TIMESTAMP(3)) ORDER BY i.created_at,i.id LIMIT 1 FOR UPDATE SKIP LOCKED`, s.adapterVersion()).Scan(&iid, &bid, &user, &seq)
+	err = tx.QueryRowContext(ctx, `SELECT i.id,i.batch_id,i.user_id,i.claim_seq,b.state_enc FROM save_batch_item i JOIN save_batch b ON b.id=i.batch_id JOIN parse_result p ON p.id=b.result_id JOIN app_user u ON u.id=i.user_id WHERE u.status='active' AND p.adapter_version=? AND b.cancel_requested=FALSE AND b.expires_at>UTC_TIMESTAMP(3) AND i.prepare_status IN ('PENDING','PREPARING') AND (i.lease_expires_at IS NULL OR i.lease_expires_at<=UTC_TIMESTAMP(3)) ORDER BY i.created_at,i.id LIMIT 1 FOR UPDATE SKIP LOCKED`, s.adapterVersion()).Scan(&iid, &bid, &user, &seq, &enc)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
+	b := &batch{}
+	if err = s.openTask(bid, "batch", enc, b); err != nil {
+		return false, err
+	}
+	x := b.findItem(iid)
+	if x == nil {
+		return false, errors.New("missing batch item")
+	}
+	deadline := minTime(x.Deadline, b.ExpiresAt)
+	lease := s.Settings.Seconds("media_fetch_timeout_seconds")
 	seq++
-	_, err = tx.ExecContext(ctx, "UPDATE save_batch_item SET lease_owner=?,lease_expires_at=?,claim_seq=?,prepare_status='PREPARING',version=version+1 WHERE id=?", owner, time.Now().Add(s.Settings.Seconds("media_fetch_timeout_seconds")), seq, iid)
+	_, err = tx.ExecContext(ctx, "UPDATE save_batch_item SET lease_owner=?,lease_expires_at=?,claim_seq=?,prepare_status='PREPARING',version=version+1 WHERE id=?", owner, minTime(deadline, time.Now().Add(lease)), seq, iid)
 	if err != nil {
 		return false, err
 	}
 	if err = tx.Commit(); err != nil {
 		return false, err
 	}
-	err = s.Sessions.DB.QueryRowContext(ctx, "SELECT state_enc FROM save_batch WHERE id=? AND user_id=?", bid, user).Scan(&enc)
-	if err != nil {
-		return true, err
+	if !time.Now().Before(deadline) {
+		return true, s.publishPersistentItem(ctx, owner, seq, b, *x)
 	}
-	b := &batch{}
-	if err = s.openTask(bid, "batch", enc, b); err != nil {
-		return true, err
-	}
-	x := b.findItem(iid)
-	if x == nil {
-		return true, errors.New("missing batch item")
-	}
-	res, err := s.loadPersistentResult(ctx, user, b.ResultID)
-	if err != nil {
-		return true, err
-	}
-	local := Mock{Settings: s.Settings, results: map[string]*result{res.ID: res.result}}
-	if s.Relay == nil {
-		local.prepare(b, x, time.Now().UTC())
-	} else {
-		call, cancel := context.WithDeadline(ctx, x.Deadline)
-		defer cancel()
-		if !time.Now().Before(x.Deadline) {
-			x.Status, x.Failure = "FAILED", "PREPARE_TIMEOUT"
+	call, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	go s.renewMediaLease(call, cancel, iid, user, owner, seq, deadline, lease)
+	res, err := s.loadPersistentResult(call, user, b.ResultID)
+	if err == nil {
+		if s.Relay == nil {
+			local := Mock{Settings: s.Settings, results: map[string]*result{res.ID: res.result}}
+			local.prepare(b, x, time.Now().UTC())
 		} else {
 			s.prepareDelivery(call, b, x, res)
 		}
 	}
+	if call.Err() == context.Canceled || err != nil && call.Err() != context.DeadlineExceeded {
+		return true, err
+	}
 	return true, s.publishPersistentItem(ctx, owner, seq, b, *x)
 }
+
+func (s *Mock) renewMediaLease(ctx context.Context, cancel context.CancelFunc, id, user, owner string, seq uint64, deadline time.Time, lease time.Duration) {
+	ticker := time.NewTicker(lease / 2)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			result, err := s.Sessions.DB.ExecContext(ctx, `UPDATE save_batch_item SET lease_expires_at=?,version=version+1
+				WHERE id=? AND user_id=? AND claim_seq=? AND lease_owner=? AND prepare_status='PREPARING' AND lease_expires_at>UTC_TIMESTAMP(3)`,
+				minTime(deadline, time.Now().Add(lease)), id, user, seq, owner)
+			if err == nil {
+				var changed int64
+				changed, err = result.RowsAffected()
+				if err == nil && changed == 1 {
+					continue
+				}
+			}
+			cancel()
+			return
+		}
+	}
+}
+
 func (s *Mock) publishPersistentItem(ctx context.Context, owner string, seq uint64, b *batch, x item) error {
 	tx, err := s.Sessions.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -366,7 +391,12 @@ func (s *Mock) publishPersistentItem(ctx context.Context, owner string, seq uint
 	if old == nil || old.Attempt != x.Attempt || old.Status != "PREPARING" && old.Status != "PENDING" {
 		return nil
 	}
-	changed, err := tx.ExecContext(ctx, "UPDATE save_batch_item SET prepare_status=?,delivery_mode=?,media_object_id=?,error_code=?,version=version+1 WHERE id=? AND user_id=? AND claim_seq=? AND lease_owner=? AND lease_expires_at>UTC_TIMESTAMP(3) AND prepare_status='PREPARING'", x.Status, x.Mode, x.ObjectID, x.Failure, x.ID, b.User, seq, owner)
+	timedOut := !time.Now().Before(old.Deadline)
+	if timedOut {
+		x = *old
+		x.Status, x.Failure = "FAILED", "PREPARE_TIMEOUT"
+	}
+	changed, err := tx.ExecContext(ctx, "UPDATE save_batch_item SET prepare_status=?,delivery_mode=?,media_object_id=?,error_code=?,lease_owner=NULL,lease_expires_at=NULL,version=version+1 WHERE id=? AND user_id=? AND claim_seq=? AND lease_owner=? AND (lease_expires_at>UTC_TIMESTAMP(3) OR ?) AND prepare_status='PREPARING'", x.Status, x.Mode, x.ObjectID, x.Failure, x.ID, b.User, seq, owner, timedOut)
 	if err != nil {
 		return err
 	}
