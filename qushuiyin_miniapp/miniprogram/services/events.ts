@@ -6,7 +6,9 @@ const stages = { result_viewed: 'result', preview_started: 'preview', preview_fi
   save_action_started: 'save', save_action_finished: 'save', client_download_finished: 'download', album_save_finished: 'album' } as const
 type Name = keyof typeof stages
 type Outcome = 'started' | 'succeeded' | 'failed' | 'cancelled' | 'partial' | 'unknown'
-type Code = 'CLIENT_DOWNLOAD_FAILED' | 'DIRECT_DOWNLOAD_REJECTED' | 'USER_CANCELLED' | 'SAVE_OUTCOME_UNKNOWN'
+const codes = ['CLIENT_DOWNLOAD_FAILED', 'DIRECT_DOWNLOAD_REJECTED', 'DIRECT_CONTENT_INVALID', 'USER_CANCELLED', 'SAVE_OUTCOME_UNKNOWN',
+  'CLIENT_NETWORK_ERROR', 'CLIENT_STORAGE_LOW', 'ALBUM_PERMISSION_DENIED', 'SYSTEM_PERMISSION_DENIED', 'ALBUM_SAVE_FAILED', 'PRIVACY_DECLINED'] as const
+type Code = typeof codes[number]
 interface Details {
   flowId?: string; clientActionId?: string; jobId?: string; batchId?: string; itemId?: string
   deliveryMode?: 'direct' | 'relay'; errorCode?: Code; durationMs?: number; bytes?: number
@@ -20,7 +22,6 @@ interface Queue { entries: Entry[]; limits?: EventLimits }
 const opaque = (s: unknown) => typeof s === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(s) ? s : null
 const metric = (n: unknown) => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0 ? n : null
 const outcomes = ['started', 'succeeded', 'failed', 'cancelled', 'partial', 'unknown']
-const codes = ['CLIENT_DOWNLOAD_FAILED', 'DIRECT_DOWNLOAD_REJECTED', 'USER_CANCELLED', 'SAVE_OUTCOME_UNKNOWN']
 const osFamilies = ['ios', 'android', 'windows', 'macos', 'devtools', 'unknown']
 function payload(name: Name, outcome: Outcome, details: Details | Payload, eventId: string, clientTime: string, osFamily: string): Payload {
   const code = details.errorCode

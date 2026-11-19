@@ -10,3 +10,5 @@ button.play { position: relative; }
 .preview-image { display: block; width: 100%; border-radius: 8px; }
 .caption { color: #35455e; white-space: pre-wrap; overflow-wrap: anywhere; }
 .save-actions { flex-wrap: wrap; }
+.selection-tools { gap: 8px; flex-wrap: wrap; }
+.save-items { gap: 8px; overflow-wrap: anywhere; }

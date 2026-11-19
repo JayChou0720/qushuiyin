@@ -46,7 +46,12 @@ async function run() {
   const source = 'https://www.xiaohongshu.com/explore/10002?signature=x%2By&token=a%3Db'
   const parse = async (url = source) => {
     const { data } = await api.startParse({ shareText: url, selectedUrl: url, source: 'history', flowId: api.id() }, api.id(), owner)
-    const job = await api.queryJob(data.jobId, owner)
+    let job = await api.queryJob(data.jobId, owner)
+    while (['QUEUED', 'RUNNING'].includes(job.status) && Date.now() < Date.parse(data.deadlineAt)) {
+      await api.wait(data.pollAfterMs)
+      job = await api.queryJob(data.jobId, owner)
+    }
+    assert.equal(job.status, 'SUCCEEDED')
     const result = await api.queryResult(job.resultId, owner)
     return { context: { resultId: result.resultId, userId: owner, source: job.historySource }, result }
   }

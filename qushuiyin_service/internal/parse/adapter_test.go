@@ -3,11 +3,42 @@ package parse
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/wujunwei928/parse-video/parser"
 	"net/url"
 	"qushuiyin/service/internal/config"
 	"testing"
 )
+
+func TestGalleryAssetLimitKeepsOriginalOrder(t *testing.T) {
+	l := config.Defaults()
+	a, err := Mock(l, ValidationPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, count := range []int{1, 20, 21, l.Assets, l.Assets + 1} {
+		info := &parser.VideoParseInfo{}
+		for order := 1; order <= count; order++ {
+			info.Images = append(info.Images, parser.ImgInfo{Url: fmt.Sprintf("https://media.example.test/%d.jpg", order)})
+		}
+		a.Resolve = func(context.Context, string) (*parser.VideoParseInfo, error) { return info, nil }
+		result, err := a.Parse(t.Context(), "https://www.xiaohongshu.com/explore/10004")
+		if count > l.Assets {
+			if err != Code("TOO_MANY_ASSETS") {
+				t.Fatalf("gallery above the limit returned %v", err)
+			}
+			continue
+		}
+		if err != nil || len(result.Assets) != count {
+			t.Fatalf("gallery of %d did not survive normalization: %v", count, err)
+		}
+		for index, asset := range result.Assets {
+			if asset.Order != index+1 || asset.Source != info.Images[index].Url {
+				t.Fatal("gallery order changed", asset.Order)
+			}
+		}
+	}
+}
 
 func TestFixtures(t *testing.T) {
 	a, e := Mock(config.Defaults(), ValidationPolicy())

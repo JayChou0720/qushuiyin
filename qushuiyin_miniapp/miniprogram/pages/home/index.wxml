@@ -1,6 +1,7 @@
 <view class="screen stack">
   <view class="row spread"><text class="title">解析作品</text><text class="badge">本地演练</text></view>
   <view wx:if="{{cleanupNotice}}" class="surface" role="status">{{cleanupNotice}}</view>
+  <navigator wx:if="{{resumeResultId && !busy}}" class="action-link quiet-link" url="/pages/result/index?resultId={{resumeResultId}}" hover-class="button-press">继续上次保存</navigator>
   <view class="surface stack">
     <view class="row spread"><label class="section-title" for="share">分享链接</label><button class="action quiet" disabled="{{busy || !inputReady}}" bindtap="example" hover-class="button-press">填入示例</button></view>
     <textarea id="share" class="share-input" placeholder="粘贴链接或分享文案" value="{{text}}" maxlength="{{maxLength}}" disabled="{{busy || !inputReady}}" bindinput="edit" />

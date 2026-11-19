@@ -4,7 +4,7 @@
   <view class="privacy-section">
     <text class="section-title">数据如何使用</text>
     <text class="muted">解析所需信息会发送至服务器处理。最近记录仅保存在本机。</text>
-    <text class="muted">仅在你点击粘贴时读取剪贴板。相册权限用于保存你选择的作品，本地演练不写入相册。</text>
+    <text class="muted">仅在你点击粘贴时读取剪贴板。相册权限用于保存你主动选择的作品。</text>
     <button class="action privacy-action" bindtap="showContract" hover-class="button-press">微信隐私保护指引</button>
     <text wx:if="{{legalMessage}}" class="muted" role="status">{{legalMessage}}</text>
     <text class="muted">正式用户协议尚未发布。</text>

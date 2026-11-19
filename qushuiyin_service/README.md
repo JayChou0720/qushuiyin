@@ -9,7 +9,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ./qushuiyin_service/scripts/
 node ./qushuiyin_service/scripts/smoke-mock.mjs
 ```
 
-在微信开发者工具中打开 `qushuiyin_miniapp/`。首页点「填入示例」可测试视频；粘贴 `https://www.xiaohongshu.com/explore/10002` 可测试图集。结果页的保存按钮下载本地样本到临时文件，当前不写入相册。开发登录和样本只用于本机联调，不访问平台的真实媒体。小程序体验版或正式版不使用本地地址。
+在微信开发者工具中打开 `qushuiyin_miniapp/`。首页点「填入示例」可测试视频，粘贴 `https://www.xiaohongshu.com/explore/10004` 可测试三张图集。结果页点击保存后会检查隐私授权和相册权限，通过后向相册保存样本。开发登录和样本用于本机联调。小程序体验版或正式版使用正式配置。
 
 结果页点「播放视频」或图集的「预览」可检查样本预览。以下链接仅用作 Mock 输入，不会访问真实媒体：
 
@@ -39,12 +39,13 @@ node ./qushuiyin_service/scripts/smoke-mock.mjs
 
 ```powershell
 $historyBuild = Join-Path $env:TEMP ('qsy-history-' + [guid]::NewGuid().ToString('N'))
-tsc --outDir $historyBuild --rootDir miniprogram
+npx tsc --noEmit -p .
+npx tsc --outDir $historyBuild -p .
 node ./scripts/smoke-history.cjs $historyBuild 18080
 node ./scripts/smoke-events.cjs $historyBuild 18080
 ```
 
-事件回归复用相同的临时编译目录，覆盖离线暂存、批量补传、丢失回执后的退避和去重，以及清除当前身份的待传队列。Mock 下载产生下载与保存动作汇总事件，相册结果事件留给真实相册回调。
+事件回归复用相同的临时编译目录，覆盖离线暂存、批量补传、回执丢失后的退避和去重，以及清除当前身份的待传队列。脚本使用模拟的微信相册回调验证图集选择、逐项保存、部分失败、已下载文件复用、取消和恢复。iOS 和 Android 的实际相册写入及权限流程由真机验收确认。
 
 ## M2：持久化与本地真实中转
 

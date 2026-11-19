@@ -1,5 +1,3 @@
-import { releaseTemporaryMedia } from './media-cache'
-
 const LOCAL_ORIGIN = 'http://127.0.0.1:18080'
 const mockIdentityKey = 'mock-dev-user'
 export const clientVersion = 'm1'
@@ -12,7 +10,7 @@ export interface Candidate { url: string; displayHost: string; platform: string 
 export interface PublicConfig {
   privacyVersion: string
   features: { mock: boolean; devLogin: boolean }
-  limits: EventLimits & { max_share_text_chars: number; max_image_batch_count: number; client_parse_wait_seconds: number; client_download_timeout_seconds: number; poll_interval_ms: number; feedback_min_chars: number; feedback_max_chars: number; feedback_contact_max_chars: number; history_max_count: number; history_ttl_days: number; thumbnail_local_budget_bytes: number }
+  limits: EventLimits & { max_share_text_chars: number; max_image_batch_count: number; client_parse_wait_seconds: number; client_download_timeout_seconds: number; max_video_bytes: number; max_image_bytes: number; poll_interval_ms: number; feedback_min_chars: number; feedback_max_chars: number; feedback_contact_max_chars: number; history_max_count: number; history_ttl_days: number; thumbnail_local_budget_bytes: number }
   platforms: { platform: string; status: string; videoEnabled: boolean; imageEnabled: boolean }[]
 }
 interface Session { userId: string; token: string; expiresAt: string }
@@ -26,17 +24,18 @@ export interface FeedbackSummary { id: string; category: string; summary: string
 export interface FeedbackDetail extends Omit<FeedbackSummary, 'summary'> { content: string; contact: string | null; reply: string | null; repliedAt: string | null }
 interface FeedbackPage { items: FeedbackSummary[]; nextCursor: string | null; hasMore: boolean }
 export interface Asset { assetId: string; type: string; order: number }
-export interface Result { resultId: string; platform: string; contentId: string | null; mediaType: string; title: string | null; description: string | null; assets: Asset[]; assetCount: number; cover: Asset | null; createdAt: string; expiresAt: string; capabilities: { canPreview: boolean } }
+export interface Result { resultId: string; platform: string; contentId: string | null; mediaType: string; title: string | null; description: string | null; assets: Asset[]; assetCount: number; cover: Asset | null; createdAt: string; expiresAt: string; warnings: string[]; capabilities: { canPreview: boolean } }
 type PreviewKind = 'video' | 'thumbnail' | 'image'
-export interface BatchItem { itemId: string; order: number; prepareStatus: string; copyLinkAvailable: boolean; error: { message: string; retryable: boolean } | null }
-export interface Batch { batchId: string; status: string; pollAfterMs: number; items: BatchItem[] }
-interface DownloadTicket { itemId: string; deliveryMode: 'relay' | 'direct'; url: string }
+export interface BatchItem { itemId: string; assetId: string; order: number; prepareStatus: string; sizeBytes: number | null; copyLinkAvailable: boolean; error: { message: string; retryable: boolean } | null }
+export interface Batch { batchId: string; status: string; expiresAt: string; items: BatchItem[] }
+interface BatchAccepted { batchId: string; status: string; pollAfterMs: number; expiresAt: string }
+export interface DownloadTicket { itemId: string; deliveryMode: 'relay' | 'direct'; url: string; expiresAt: string }
 interface Tickets { tickets: DownloadTicket[] }
 export interface Input { shareText: string; selectedUrl: string | null; source: 'paste' | 'manual' | 'history'; flowId: string }
 export class APIError extends Error {
   constructor(readonly code: string, message: string, readonly candidates: Candidate[] = []) { super(message) }
 }
-class ConnectionError extends Error {}
+export class ConnectionError extends Error {}
 let session: Session | undefined
 let loggingIn: Promise<Session> | undefined
 let cached: PublicConfig | undefined
@@ -173,39 +172,22 @@ export async function previewAsset(resultId: string, assetId: string, kind: Prev
   if (!Number.isFinite(expires) || expires <= Date.now()) throw new Error('预览地址已过期')
   return { url: !direct && kind === 'image' ? origin() + '/media/image/' + entry.url.slice(prefix.length) : entry.url, expires }
 }
-export const startBatch = (resultId: string, assetIds: string[], flowId: string, actionId: string) => request<Batch>('POST', '/v1/save-batches', { resultId, assetIds, clientActionId: actionId, flowId }, actionId)
-export const queryBatch = (batchId: string) => request<Batch>('GET', '/v1/save-batches/' + encodeURIComponent(batchId))
-export const cancelBatch = (batchId: string) => request<Batch>('DELETE', '/v1/save-batches/' + encodeURIComponent(batchId))
-export const tickets = (batchId: string, itemIds: string[]) => request<Tickets>('POST', '/v1/save-batches/' + encodeURIComponent(batchId) + '/tickets', { itemIds })
+export const startBatch = (resultId: string, assetIds: string[], flowId: string, actionId: string, owner: string) => request<BatchAccepted>('POST', '/v1/save-batches', { resultId, assetIds, clientActionId: actionId, flowId }, actionId, owner)
+export const queryBatch = (batchId: string, owner: string) => request<Batch>('GET', '/v1/save-batches/' + encodeURIComponent(batchId), undefined, undefined, owner)
+export const cancelBatch = (batchId: string, owner: string) => request<Batch>('DELETE', '/v1/save-batches/' + encodeURIComponent(batchId), undefined, undefined, owner)
+export const tickets = (batchId: string, itemIds: string[], owner: string) => request<Tickets>('POST', '/v1/save-batches/' + encodeURIComponent(batchId) + '/tickets', { itemIds }, undefined, owner)
 const itemRoute = (batchId: string, itemId: string) => '/v1/save-batches/' + encodeURIComponent(batchId) + '/items/' + encodeURIComponent(itemId)
-export const retryBatch = (batchId: string, itemIds: string[], key: string) => request<Batch>('POST', '/v1/save-batches/' + encodeURIComponent(batchId) + '/retry', { itemIds }, key)
-export const fallback = (batchId: string, itemId: string, key: string) => request<Batch>('POST', itemRoute(batchId, itemId) + '/fallback', { reason: 'DIRECT_DOWNLOAD_REJECTED' }, key)
-export async function copyDownloadURL(batchId: string, itemId: string) {
-  const { url, expiresAt } = await request<{ url: string; expiresAt: string }>('POST', itemRoute(batchId, itemId) + '/copy-link')
-  if (!url.startsWith(origin() + '/media/mock-source/copy/') || !(Date.parse(expiresAt) > Date.now())) throw new Error('下载地址已过期')
+export const retryBatch = (batchId: string, itemIds: string[], key: string, owner: string) => request<BatchAccepted>('POST', '/v1/save-batches/' + encodeURIComponent(batchId) + '/retry', { itemIds }, key, owner)
+export type FallbackReason = 'DIRECT_DOWNLOAD_REJECTED' | 'DIRECT_CONTENT_INVALID'
+export const fallback = (batchId: string, itemId: string, reason: FallbackReason, owner: string) => request<BatchAccepted>('POST', itemRoute(batchId, itemId) + '/fallback', { reason }, itemId, owner)
+const httpsMediaURL = (address: string) => /^https:\/\/[^/@?#\s]+\//i.test(address)
+export async function copyDownloadURL(batchId: string, itemId: string, owner: string) {
+  const { url, expiresAt } = await request<{ url: string; expiresAt: string }>('POST', itemRoute(batchId, itemId) + '/copy-link', undefined, undefined, owner)
+  if ((!httpsMediaURL(url) && !url.startsWith(origin() + '/media/mock-source/copy/')) || !(Date.parse(expiresAt) > Date.now())) throw new Error('下载地址已过期')
   return url
 }
-export class DirectRejected extends Error {}
-export function downloadSample(ticket: DownloadTicket, timeout: number, attach: (task: WechatMiniprogram.DownloadTask) => void): Promise<number | null> {
-  return new Promise((resolve, reject) => {
-    const direct = ticket.deliveryMode === 'direct'
-    if (!ticket.url.startsWith(origin() + (direct ? '/media/mock-source/direct/' : '/media/download/'))) { reject(new Error('下载地址无效')); return }
-    const task = wx.downloadFile({ url: ticket.url, timeout,
-      success(res) {
-        let bytes: number | null = null
-        if (res.statusCode === 200 && res.tempFilePath) {
-          try { bytes = (wx.getFileSystemManager().statSync(res.tempFilePath) as WechatMiniprogram.Stats).size } catch { /* Client size is optional. */ }
-        }
-        if (res.tempFilePath) void releaseTemporaryMedia(res.tempFilePath)
-        if (res.statusCode === 200 && res.tempFilePath) resolve(bytes)
-        else if (direct && res.statusCode === 403) reject(new DirectRejected())
-        else reject(new Error('样本下载失败，请重试'))
-      },
-      fail(err) {
-        if (direct && /url not in domain list|domain.*not configured/i.test(err.errMsg)) reject(new DirectRejected())
-        else reject(new Error('下载中断，请重试'))
-      },
-    })
-    attach(task)
-  })
+export function validDownloadTicket(ticket: DownloadTicket) {
+  return ticket.deliveryMode === 'direct'
+    ? httpsMediaURL(ticket.url) || ticket.url.startsWith(origin() + '/media/mock-source/direct/')
+    : ticket.deliveryMode === 'relay' && ticket.url.startsWith(origin() + '/media/download/')
 }

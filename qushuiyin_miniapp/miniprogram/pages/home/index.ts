@@ -1,14 +1,27 @@
-import { APIError, Candidate, cancelJob, id, isCurrentUser, loadConfig } from '../../services/api'
+import { APIError, Candidate, cancelJob, confirmUserIdentity, hasHistoryIdentity, id, isCurrentUser, loadConfig } from '../../services/api'
 import { stageHistory } from '../../services/history'
 import { ParseFailure, parseFlow } from '../../services/parse-flow'
 import { takeCleanupNotice } from '../../services/privacy'
+import { latestSaveResult } from '../../services/save-progress'
 
 const names: Record<string, string> = { douyin: '抖音', xiaohongshu: '小红书', kuaishou: '快手', bilibili: 'B 站' }
 Page({
-  data: { text: '', pasted: false, maxLength: 0, parseWait: 0, inputReady: false, busy: false, error: '', job: '', feedbackTrace: '', cleanupNotice: '', sequence: 0, candidates: [] as Candidate[], platforms: [] as { name: string; available: boolean }[] },
+  data: { text: '', pasted: false, maxLength: 0, parseWait: 0, inputReady: false, busy: false, error: '', job: '', feedbackTrace: '', cleanupNotice: '', sequence: 0, resumeResultId: '', candidates: [] as Candidate[], platforms: [] as { name: string; available: boolean }[] },
   jobOwner: '',
+  recoverySequence: 0,
   onLoad() { this.setData({ cleanupNotice: takeCleanupNotice() }); void this.reloadConfig() },
-  onUnload() { void this.cancel() },
+  onShow() { void this.refreshSaveRecovery() },
+  onHide() { this.recoverySequence++ },
+  onUnload() { this.recoverySequence++; void this.cancel() },
+  async refreshSaveRecovery() {
+    const sequence = ++this.recoverySequence
+    this.setData({ resumeResultId: '' })
+    if (!hasHistoryIdentity()) return
+    try {
+      const owner = await confirmUserIdentity(false)
+      if (sequence === this.recoverySequence && isCurrentUser(owner)) this.setData({ resumeResultId: latestSaveResult(owner) })
+    } catch { /* A recovery entry is visible once its owner is confirmed. */ }
+  },
   async reloadConfig() {
     try {
       const config = await loadConfig()

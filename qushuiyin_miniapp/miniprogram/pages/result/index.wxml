@@ -1,5 +1,5 @@
 <view class="screen stack">
-  <view class="row spread"><text class="title">解析结果</text><text class="badge">本地演练</text></view>
+  <text class="title">解析结果</text>
   <text wx:if="{{error && !result}}" class="error" role="alert">{{error}}</text>
   <text wx:if="{{!error && !result}}" class="muted">正在读取结果</text>
   <button wx:if="{{error && !result}}" class="action" bindtap="load">重试</button>
@@ -24,21 +24,39 @@
         <text wx:if="{{previewError}}" class="error" role="alert">{{previewError}}</text>
       </view>
       <view wx:if="{{result.mediaType === 'image'}}" class="gallery">
+        <view class="row spread selection-tools">
+          <text class="muted" aria-live="polite">已选 {{count}} 张</text>
+          <button class="action quiet" disabled="{{hasSave}}" bindtap="selectBatch" hover-class="button-press">{{result.assetCount > max ? '选择前 ' + max + ' 张' : count === result.assetCount ? '取消全选' : '全选'}}</button>
+        </view>
+        <text wx:if="{{result.assetCount > max}}" class="muted">每批最多保存 {{max}} 张，可分批选择。</text>
+        <text wx:if="{{staticOnly}}" class="muted">当前仅支持保存静态图片。</text>
         <view wx:for="{{result.assets}}" wx:key="assetId" class="asset-option">
-          <label class="asset-check" bindtap="toggle" data-asset="{{item.assetId}}"><checkbox checked="{{selected[item.assetId]}}" disabled="{{busy}}" />图片 {{item.order}}</label>
+          <label class="asset-check" bindtap="toggle" data-asset="{{item.assetId}}"><checkbox checked="{{selected[item.assetId]}}" disabled="{{hasSave}}" />图片 {{item.order}}</label>
           <button wx:if="{{result.capabilities.canPreview}}" class="action quiet thumb-button" id="thumb-{{item.assetId}}" bindtap="viewImage" data-asset="{{item.assetId}}" hover-class="button-press" aria-label="预览图片 {{item.order}}"><image wx:if="{{thumbnails[item.assetId]}}" class="thumbnail" src="{{thumbnails[item.assetId]}}" mode="aspectFill" lazy-load aria-hidden="true" /><text>预览</text></button>
         </view>
       </view>
-      <view wx:if="{{result.description}}" class="stack"><text class="caption">{{result.description}}</text><button class="action" bindtap="copy" hover-class="button-press">复制文案</button></view>
+      <view wx:if="{{copyText}}" class="stack"><text wx:if="{{result.description}}" class="caption">{{result.description}}</text><text wx:if="{{truncated}}" class="muted">仅取得部分文案。</text><button class="action" bindtap="copy" hover-class="button-press">复制文案</button></view>
     </view>
     <view class="row save-actions">
-      <button class="action primary" disabled="{{busy || !count}}" loading="{{busy}}" bindtap="save" hover-class="button-press"><image class="icon" src="/icons/download.svg" />{{result.mediaType === 'video' ? '演练保存视频' : '演练保存 ' + count + ' 张图片'}}</button>
-      <button wx:if="{{busy}}" class="action quiet" bindtap="cancel">取消下载</button>
+      <button wx:if="{{!hasSave}}" class="action primary" disabled="{{busy || !count}}" bindtap="save" hover-class="button-press"><image class="icon" src="/icons/download.svg" aria-hidden="true" />{{result.mediaType === 'video' ? '保存视频' : '保存选中图片（' + count + '）'}}</button>
+      <button wx:if="{{retryAvailable && !busy}}" class="action primary" disabled="{{albumPending}}" bindtap="retrySave" hover-class="button-press">{{paused ? '继续保存' : '重试未完成项'}}</button>
+      <button wx:if="{{hasSave && !privacyVisible}}" class="action quiet" bindtap="cancel" hover-class="button-press">{{busy ? '取消保存' : '结束本次保存'}}</button>
     </view>
-    <button wx:if="{{result.cover}}" class="action" disabled="{{busy}}" bindtap="saveCover" hover-class="button-press">演练保存封面</button>
+    <button wx:if="{{result.cover && !hasSave}}" class="action" disabled="{{busy}}" bindtap="saveCover" hover-class="button-press">保存封面</button>
+    <view wx:if="{{privacyVisible}}" class="surface stack">
+      <text>保存到相册需要你同意微信隐私保护指引。</text>
+      <button class="action" bindtap="showPrivacyContract" hover-class="button-press">查看微信隐私保护指引</button>
+      <view class="row save-actions">
+        <button class="action primary" id="save-privacy-agree" open-type="agreePrivacyAuthorization" bindagreeprivacyauthorization="privacyAgree" hover-class="button-press">同意并继续</button>
+        <button class="action quiet" bindtap="privacyDecline" hover-class="button-press">暂不同意</button>
+      </view>
+    </view>
     <text wx:if="{{error}}" class="error" role="alert">{{error}}</text>
-    <text wx:elif="{{status}}" class="muted" aria-live="polite">{{status}}</text>
-    <button wx:if="{{retryAvailable && !busy}}" class="action" bindtap="retrySave" hover-class="button-press">重试未完成项</button>
+    <text wx:if="{{status}}" class="muted" aria-live="polite">{{status}}</text>
+    <button wx:if="{{settingsAvailable && !busy}}" class="action" bindtap="albumSettings" hover-class="button-press">打开相册权限设置</button>
+    <view wx:if="{{saveItems.length}}" class="stack save-items">
+      <text wx:for="{{saveItems}}" wx:key="itemId" class="muted">{{item.label}}</text>
+    </view>
     <button wx:for="{{copyItems}}" wx:key="itemId" class="action" bindtap="copyLink" data-item="{{item.itemId}}" hover-class="button-press">复制{{result.mediaType === 'image' ? '图片 ' + item.order + ' 的' : ''}}下载链接</button>
     <navigator class="action-link quiet-link" url="/pages/feedback/create" hover-class="button-press">问题反馈</navigator>
   </block>

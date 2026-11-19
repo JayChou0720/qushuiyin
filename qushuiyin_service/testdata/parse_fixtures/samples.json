@@ -62,6 +62,15 @@
   "https://www.xiaohongshu.com/explore/10003": {
     "failure": true
   },
+  "https://www.xiaohongshu.com/explore/10004": {
+    "info": {
+      "images": [
+        { "url": "https://media.example.test/1.jpg" },
+        { "url": "https://media.example.test/2.jpg" },
+        { "url": "https://media.example.test/3.jpg" }
+      ]
+    }
+  },
   "https://www.kuaishou.com/short-video/10001": {
     "info": {
       "video_url": "https://media.example.test/sample.mp4",
