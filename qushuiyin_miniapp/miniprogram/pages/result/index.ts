@@ -2,7 +2,7 @@ import { APIError, Asset, Batch, BatchItem, ConnectionError, PublicConfig, Resul
 import { cacheThumbnail, noteHistorySave, recordHistory, takeHistory } from '../../services/history'
 import { enqueueClientEvent } from '../../services/events'
 import { LocalMedia, SaveMediaError, downloadForAlbum, ensureAlbumAccess, ensureSaveNetwork, fileSize, openAlbumSettings, respondToSavePrivacy, saveToAlbum } from '../../services/save-media'
-import { SaveProgress, clearSaveProgress, loadSaveProgress, writeSaveProgress } from '../../services/save-progress'
+import { SaveProgress, clearSaveProgress, isVolatileSave, loadSaveProgress, writeSaveProgress } from '../../services/save-progress'
 import { releaseTemporaryMedia } from '../../services/media-cache'
 import { openPrivacyContract } from '../../services/privacy'
 
@@ -14,7 +14,7 @@ const retryablePreparation = (item: BatchItem) => item.prepareStatus === 'EXPIRE
 Page({
   data: { result: null as Result | null, flow: '', resultId: '', selected: {} as Record<string, boolean>, count: 0, max: 0, busy: false, error: '', status: '', sequence: 0,
     retryAvailable: false, paused: false, hasSave: false, albumPending: false, privacyVisible: false, settingsAvailable: false,
-    staticOnly: false, truncated: false, copyText: '', saveItems: [] as { itemId: string; label: string }[], copyItems: [] as { itemId: string; order: number }[],
+    staticOnly: false, truncated: false, copyText: '', saveItems: [] as { itemId: string; label: string }[], copyItems: [] as { itemId: string; order: number }[], recoveryWarning: false,
     thumbnails: {} as Record<string, string>, previewKind: '', previewURL: '', previewBusy: false, previewError: '', previewOrder: 0, previewGeneration: 0 },
   downloadTask: null as WechatMiniprogram.DownloadTask | null,
   localFiles: null as unknown as Map<string, LocalMedia>,
@@ -69,7 +69,7 @@ Page({
       if (restored) this.operation = restored
       this.setData({ result, selected, max, count: Object.keys(selected).length, error: '', copyText: result.description || result.title || '',
         staticOnly: result.warnings?.includes('LIVE_PHOTO_AS_STATIC') ?? false, truncated: result.warnings?.includes('TEXT_TRUNCATED') ?? false,
-        hasSave: !!restored, paused: !!restored, retryAvailable: !!restored }, () => {
+        hasSave: !!restored, paused: !!restored, retryAvailable: !!restored, recoveryWarning: isVolatileSave(userId, result.resultId) }, () => {
         if (this.disposed) return
         enqueueClientEvent(userId, 'result_viewed', 'succeeded', { flowId: this.data.flow, jobId: this.jobId })
         this.observeThumbnails(result)
@@ -191,13 +191,13 @@ Page({
     const operation: SaveProgress = { userId: this.historyOwner, resultId: result.resultId, flowId: this.data.flow,
       actionId: id(), assetIds: assets.map(asset => asset.assetId), batchId: '', expiresAt: result.expiresAt, states: {} }
     this.operation = operation
-    this.setData({ hasSave: true, saveItems: [], copyItems: [] })
+    this.setData({ hasSave: true, saveItems: [], copyItems: [], recoveryWarning: false })
     void this.runSave(operation, false)
   },
   persistSave(operation: SaveProgress) {
     if (this.operation !== operation || !isKnownUser(operation.userId)) throw new Error('使用身份已变更，请重新打开结果')
-    try { writeSaveProgress(operation) }
-    catch { throw new SaveMediaError('CLIENT_STORAGE_LOW', '无法记录保存进度，请清理本机空间后继续') }
+    const durable = writeSaveProgress(operation)
+    if (!this.disposed && this.data.recoveryWarning === durable) this.setData({ recoveryWarning: !durable })
   },
   async inspectRecovery() {
     const operation = this.operation
@@ -352,8 +352,7 @@ Page({
         }
         if (!current()) return
         operation.states[item.itemId] = 'SAVING'
-        try { this.persistSave(operation) }
-        catch (error) { operation.states[item.itemId] = 'FAILED'; throw error }
+        this.persistSave(operation)
         this.setData({ status: '正在写入相册 · 第 ' + item.order + ' 项', albumPending: true })
         await this.writeAlbum(operation, item, file, kind)
         if (current()) {
@@ -425,7 +424,7 @@ Page({
       throw error
     }).finally(() => {
       // Native album callbacks can complete after the page is hidden.
-      try { this.persistSave(operation) } catch { /* The SAVING checkpoint will recover as UNKNOWN. */ }
+      try { this.persistSave(operation) } catch { /* The operation or its owner changed while the native call was running. */ }
       this.albumTask = null
       if (!this.disposed) {
         this.setData({ albumPending: false })
@@ -494,7 +493,7 @@ Page({
     if (operation && isKnownUser(operation.userId)) {
       try { clearSaveProgress(operation.userId, operation.resultId) } catch { /* Recovery skips any recorded successful items. */ }
     }
-    this.setData({ hasSave: false, paused: false, retryAvailable: false, copyItems: [], settingsAvailable: false,
+    this.setData({ hasSave: false, paused: false, retryAvailable: false, recoveryWarning: false, copyItems: [], settingsAvailable: false,
       status: status || this.data.status })
   },
   async cancel() {

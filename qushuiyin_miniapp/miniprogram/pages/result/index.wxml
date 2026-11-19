@@ -52,6 +52,7 @@
       </view>
     </view>
     <text wx:if="{{error}}" class="error" role="alert">{{error}}</text>
+    <text wx:if="{{recoveryWarning}}" class="muted" role="status">本机空间不足，当前进度仅在本次运行中保留。重开小程序后请先核对相册。</text>
     <text wx:if="{{status}}" class="muted" aria-live="polite">{{status}}</text>
     <button wx:if="{{settingsAvailable && !busy}}" class="action" bindtap="albumSettings" hover-class="button-press">打开相册权限设置</button>
     <view wx:if="{{saveItems.length}}" class="stack save-items">

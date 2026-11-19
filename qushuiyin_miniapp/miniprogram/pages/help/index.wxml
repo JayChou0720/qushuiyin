@@ -1,6 +1,7 @@
 <view class="screen stack">
   <text class="title">使用帮助</text>
-  <view class="surface stack"><text class="section-title">本地演练</text><text class="muted">可用内置示例测试解析和保存。点击保存并允许相册权限后，样本会写入相册。</text></view>
+  <view class="surface stack"><text class="section-title">解析与保存</text><text class="muted">粘贴作品分享链接后开始解析。点击保存并允许相册权限后，文件会写入相册。</text><text wx:if="{{mock}}" class="muted">本地演练可用首页的内置示例。</text></view>
+  <view wx:if="{{message}}" class="surface" style="white-space: pre-wrap">{{message}}</view>
   <view class="stack help-feedback">
     <text class="section-title">反馈</text>
     <navigator class="action-link primary-link" url="/pages/feedback/create" hover-class="button-press">提交反馈</navigator>

@@ -1,9 +1,10 @@
 <view class="screen stack">
-  <view class="row spread"><text class="title">解析作品</text><text class="badge">本地演练</text></view>
+  <view class="row spread"><text class="title">解析作品</text><text wx:if="{{mock}}" class="badge">本地演练</text></view>
   <view wx:if="{{cleanupNotice}}" class="surface" role="status">{{cleanupNotice}}</view>
+  <view wx:if="{{notice}}" class="surface notice" role="status">{{notice}}</view>
   <navigator wx:if="{{resumeResultId && !busy}}" class="action-link quiet-link" url="/pages/result/index?resultId={{resumeResultId}}" hover-class="button-press">继续上次保存</navigator>
   <view class="surface stack">
-    <view class="row spread"><label class="section-title" for="share">分享链接</label><button class="action quiet" disabled="{{busy || !inputReady}}" bindtap="example" hover-class="button-press">填入示例</button></view>
+    <view class="row spread"><label class="section-title" for="share">分享链接</label><button wx:if="{{mock}}" class="action quiet" disabled="{{busy || !inputReady}}" bindtap="example" hover-class="button-press">填入示例</button></view>
     <textarea id="share" class="share-input" placeholder="粘贴链接或分享文案" value="{{text}}" maxlength="{{maxLength}}" disabled="{{busy || !inputReady}}" bindinput="edit" />
     <text wx:if="{{error}}" class="error" role="alert">{{error}}</text>
     <navigator wx:if="{{error && inputReady && !candidates.length}}" class="action-link quiet-link" url="{{'/pages/feedback/create' + (feedbackTrace ? '?traceId=' + feedbackTrace : '')}}" hover-class="button-press">问题反馈</navigator>
@@ -16,8 +17,9 @@
     <button wx:if="{{!inputReady && error}}" class="action" bindtap="reloadConfig">重试连接</button>
   </view>
   <view wx:if="{{platforms.length}}" class="stack platform-section">
-    <text class="section-title">演练平台</text>
-    <view class="platforms"><text class="platform {{item.available ? 'available' : ''}}" wx:for="{{platforms}}" wx:key="name">{{item.name}}{{item.available ? '' : ' · 未开放'}}</text></view>
+    <text class="section-title">支持平台</text>
+    <view class="platforms"><text class="platform {{item.available ? 'available' : ''}}" wx:for="{{platforms}}" wx:key="name">{{item.name}}{{item.available ? '' : item.maintenance ? ' · 维护中' : ' · 未开放'}}</text></view>
+    <block wx:for="{{platforms}}" wx:key="name"><text wx:if="{{item.message}}" class="muted notice">{{item.name}} · {{item.message}}</text></block>
   </view>
   <view wx:if="{{!busy}}" class="row">
     <navigator class="action-link quiet-link" url="/pages/history/index" hover-class="button-press">最近记录</navigator>

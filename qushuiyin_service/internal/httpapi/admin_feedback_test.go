@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -78,6 +79,7 @@ func TestAdminFeedbackMySQL(t *testing.T) {
 	_, auditor := seedAdmin("auditor")
 	_, viewer := seedAdmin("viewer")
 	_, tech := seedAdmin("tech_admin")
+	superID, super := seedAdmin("super_admin")
 	owner, err := store.DevLogin(ctx, auth.ID())
 	if err != nil {
 		t.Fatal(err)
@@ -89,31 +91,35 @@ func TestAdminFeedbackMySQL(t *testing.T) {
 			}
 		}
 	})
-	request := func(method, path, cookie, bearer, site, body string, want int, code string) (dto, string) {
-		t.Helper()
-		r := httptest.NewRequest(method, origin+path, strings.NewReader(body))
-		if cookie != "" {
-			r.Header.Set("Cookie", adminCookie+"="+cookie)
+	type requestFunc func(method, path, cookie, bearer, site, body string, want int, code string) (dto, string)
+	makeRequest := func(t *testing.T) requestFunc {
+		return func(method, path, cookie, bearer, site, body string, want int, code string) (dto, string) {
+			t.Helper()
+			r := httptest.NewRequest(method, origin+path, strings.NewReader(body))
+			if cookie != "" {
+				r.Header.Set("Cookie", adminCookie+"="+cookie)
+			}
+			if bearer != "" {
+				r.Header.Set("Authorization", "Bearer "+bearer)
+			}
+			if site != "" {
+				r.Header.Set("Origin", site)
+			}
+			r.Header.Set("Idempotency-Key", auth.ID())
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			var res struct {
+				Code, RequestID string
+				Data            dto
+			}
+			err := json.Unmarshal(w.Body.Bytes(), &res)
+			if err != nil || w.Code != want || res.Code != code || res.RequestID != w.Header().Get("X-Request-Id") {
+				t.Fatalf("%s %s: got %d %s, want %d %s: %v", method, path, w.Code, res.Code, want, code, err)
+			}
+			return res.Data, res.RequestID
 		}
-		if bearer != "" {
-			r.Header.Set("Authorization", "Bearer "+bearer)
-		}
-		if site != "" {
-			r.Header.Set("Origin", site)
-		}
-		r.Header.Set("Idempotency-Key", auth.ID())
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, r)
-		var res struct {
-			Code, RequestID string
-			Data            dto
-		}
-		err := json.Unmarshal(w.Body.Bytes(), &res)
-		if err != nil || w.Code != want || res.Code != code || res.RequestID != w.Header().Get("X-Request-Id") {
-			t.Fatalf("%s %s: got %d %s, want %d %s: %v", method, path, w.Code, res.Code, want, code, err)
-		}
-		return res.Data, res.RequestID
 	}
+	request := makeRequest(t)
 	const raw = `{"category":"download_failed","content":"Synthetic private feedback","contact":"feedback@example.invalid","includeSource":true,"sourceUrl":"https://www.douyin.com/video/10001?signature=local-mock"}`
 	posted, _ := request("POST", "/v1/feedbacks", "", owner.Token, "", raw, 201, "OK")
 	id := posted["feedbackId"].(string)
@@ -204,10 +210,161 @@ func TestAdminFeedbackMySQL(t *testing.T) {
 	if expires.After(limit) || expires.Before(limit.Add(-time.Minute)) {
 		t.Fatal("close did not shorten feedback retention")
 	}
+	privatePath := path + "/private"
+	request("POST", privatePath, support, "", origin, `{"reason":"Local review"}`, 403, "ACCESS_DENIED")
+	request("POST", privatePath, super, "", "https://wrong.invalid", `{"reason":"Local review"}`, 403, "ACCESS_DENIED")
+	private, _ := request("POST", privatePath, super, "", origin, `{"reason":"Local review"}`, 200, "OK")
+	if private["contact"] != "feedback@example.invalid" || private["sourceUrl"] != "https://www.douyin.com/video/10001?signature=local-mock" {
+		t.Fatal("admin private projection omitted consented attachment")
+	}
+	privateAudit, _ := request("GET", audit+"&action=feedback_private_view", auditor, "", "", "", 200, "OK")
+	encoded, _ := json.Marshal(privateAudit)
+	if len(privateAudit["items"].([]any)) != 1 || bytes.Contains(encoded, []byte("example.invalid")) || bytes.Contains(encoded, []byte("signature")) {
+		t.Fatal("private access was not audited safely")
+	}
+
+	backup, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backup.Close()
+	backupExec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := backup.ExecContext(ctx, query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, table := range []string{"app_user", "app_session", "feedback"} {
+		ownerColumn := "user_id"
+		if table == "app_user" {
+			ownerColumn = "id"
+		}
+		backupExec("CREATE TEMPORARY TABLE restore_"+table+" AS SELECT * FROM "+table+" WHERE "+ownerColumn+"=?", owner.UserID)
+		defer backup.ExecContext(ctx, "DROP TEMPORARY TABLE restore_"+table)
+	}
 	request("DELETE", "/v1/me/data", "", owner.Token, "", "", 200, "OK")
 	request("GET", path, support, "", "", "", 404, "RESOURCE_NOT_FOUND")
 	page, _ = request("GET", audit, auditor, "", "", "", 200, "OK")
-	if len(page["items"].([]any)) != 4 {
+	if len(page["items"].([]any)) != 5 {
 		t.Fatal("redacted audit should remain after feedback deletion")
 	}
+	var manifest bytes.Buffer
+	if _, err = ExportDeletions(ctx, db, key, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	// Restore the pre-deletion backup while the restored service is offline.
+	backupExec("UPDATE app_user u JOIN restore_app_user b ON u.id=b.id SET u.status=b.status,u.subject_hash=b.subject_hash,u.deleted_at=b.deleted_at")
+	backupExec("DELETE s FROM app_session s JOIN restore_app_session b ON s.id=b.id")
+	backupExec("INSERT INTO app_session SELECT * FROM restore_app_session")
+	backupExec("INSERT INTO feedback SELECT * FROM restore_feedback")
+	if _, err = ReplayDeletions(ctx, db, []byte("incorrect key"), bytes.NewReader(manifest.Bytes())); err == nil {
+		t.Fatal("an unauthenticated deletion manifest was accepted")
+	}
+	var restoredStatus string
+	if err = db.QueryRowContext(ctx, "SELECT status FROM app_user WHERE id=?", owner.UserID).Scan(&restoredStatus); err != nil || restoredStatus != "active" {
+		t.Fatal("invalid manifest changed the restore")
+	}
+	for range 2 {
+		if _, err = ReplayDeletions(ctx, db, key, bytes.NewReader(manifest.Bytes())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request("GET", userPath, "", owner.Token, "", "", 401, "SESSION_EXPIRED")
+	request("GET", path, support, "", "", "", 404, "RESOURCE_NOT_FOUND")
+	request("POST", privatePath, super, "", origin, `{"reason":"Local review"}`, 404, "RESOURCE_NOT_FOUND")
+	for _, table := range []string{"app_session", "feedback"} {
+		var rows int
+		err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table+" WHERE user_id=?", owner.UserID).Scan(&rows)
+		if err != nil || rows != 0 {
+			t.Fatalf("replay left %s rows: %d, %v", table, rows, err)
+		}
+	}
+
+	t.Run("administration", func(t *testing.T) {
+		request := makeRequest(t)
+		for _, p := range []struct{ path, role, query string }{
+			{"download-domains", tech, "?status=invalid"}, {"platforms", tech, ""},
+			{"failures", tech, "?stage=invalid"}, {"config", super, ""},
+			{"admin-users", super, "?limit=0"}, {"config/public_notice/versions", operator, "?cursor=invalid"},
+		} {
+			base := "/admin/v1/" + p.path
+			request("GET", base, "", "", "", "", 401, "AUTH_REQUIRED")
+			request("GET", base, viewer, "", "", "", 403, "ACCESS_DENIED")
+			request("GET", base, p.role, "", "", "", 200, "OK")
+			if p.query != "" {
+				request("GET", base+p.query, p.role, "", "", "", 400, "BAD_REQUEST")
+			}
+		}
+		request("GET", "/admin/v1/overview", viewer, "", "", "", 200, "OK")
+		request("GET", "/admin/v1/overview?from=not-a-date", viewer, "", "", "", 400, "BAD_REQUEST")
+
+		domainID := auth.ID()
+		exec("INSERT INTO download_domain(id,platform,host,status,first_seen_at,last_seen_at,created_at,updated_at,seen_count) VALUES (?,'douyin',?,'observed',UTC_TIMESTAMP(3),UTC_TIMESTAMP(3),UTC_TIMESTAMP(3),UTC_TIMESTAMP(3),3)", domainID, strings.ToLower(domainID)+".test")
+		t.Cleanup(func() { exec("DELETE FROM download_domain WHERE id=?", domainID) })
+		domainPath := "/admin/v1/download-domains/" + domainID
+		const registered = `{"expectedVersion":1,"status":"registered","reason":"Test WeChat confirmation"}`
+		request("PATCH", domainPath, "", "", origin, registered, 401, "AUTH_REQUIRED")
+		request("PATCH", domainPath, operator, "", origin, registered, 403, "ACCESS_DENIED")
+		request("PATCH", domainPath, tech, "", origin, `{"status":"unknown"}`, 400, "BAD_REQUEST")
+		result, _ := request("PATCH", domainPath, tech, "", origin, registered, 200, "OK")
+		if result["status"] != "registered" || result["registeredAt"] == nil {
+			t.Fatal("registration was not persisted")
+		}
+		request("PATCH", domainPath, tech, "", origin, registered, 409, "VERSION_CONFLICT")
+
+		var platformVersion int64
+		if err := db.QueryRowContext(ctx, "SELECT version FROM platform_config WHERE platform='douyin'").Scan(&platformVersion); err != nil {
+			t.Fatal(err)
+		}
+		backupExec("CREATE TEMPORARY TABLE restore_platform AS SELECT * FROM platform_config WHERE platform='douyin'")
+		defer backupExec("DROP TEMPORARY TABLE restore_platform")
+		defer backupExec("UPDATE platform_config p JOIN restore_platform b ON p.id=b.id SET p.status=b.status,p.message=b.message,p.share_domains=b.share_domains,p.version=b.version,p.updated_at=b.updated_at")
+		platformPath := "/admin/v1/platforms/douyin"
+		platformPayload, _ := json.Marshal(dto{"expectedVersion": platformVersion, "status": "maintenance", "maintenanceMessage": "Test maintenance", "shareDomains": []string{"www.douyin.com"}, "reason": "Exercise settings"})
+		request("PATCH", platformPath, "", "", origin, string(platformPayload), 401, "AUTH_REQUIRED")
+		request("PATCH", platformPath, operator, "", origin, string(platformPayload), 403, "ACCESS_DENIED")
+		request("PATCH", platformPath, tech, "", origin, `{"expectedVersion":1,"shareDomains":["unrelated.invalid"],"reason":"invalid"}`, 400, "BAD_REQUEST")
+		platform, _ := request("PATCH", platformPath, tech, "", origin, string(platformPayload), 200, "OK")
+		if platform["status"] != "maintenance" || platform["maintenanceMessage"] != "Test maintenance" {
+			t.Fatal("platform changes were not returned")
+		}
+
+		t.Cleanup(func() { exec("DELETE FROM system_config WHERE operator_id=?", superID) })
+		configPath := "/admin/v1/config"
+		const invalidConfig = `{"reason":"invalid","changes":[{"key":"public_notice","expectedVersion":1,"value":12}]}`
+		request("PATCH", configPath, super, "", origin, invalidConfig, 400, "BAD_REQUEST")
+		request("PATCH", configPath, tech, "", origin, `{"reason":"no permission","changes":[{"key":"parser_workers","expectedVersion":1,"value":2}]}`, 403, "ACCESS_DENIED")
+		versions, _ := request("GET", configPath+"/public_notice/versions", operator, "", "", "", 200, "OK")
+		prior := versions["items"].([]any)[0].(map[string]any)
+		publish := func(version float64, value any) string {
+			body, _ := json.Marshal(dto{"reason": "M4 local publish", "changes": []dto{{"key": "public_notice", "expectedVersion": version, "value": value}}})
+			return string(body)
+		}
+		version := prior["version"].(float64)
+		request("PATCH", configPath, "", "", origin, publish(version, "announcement"), 401, "AUTH_REQUIRED")
+		request("PATCH", configPath, super, "", origin, publish(version, "announcement"), 200, "OK")
+		request("PATCH", configPath, super, "", origin, publish(version, "stale"), 409, "VERSION_CONFLICT")
+		public, _ := request("GET", "/v1/config", "", "", "", "", 200, "OK")
+		if public["notice"] != "announcement" {
+			t.Fatal("published notice did not reach public config")
+		}
+		request("PATCH", configPath, super, "", origin, publish(version+1, prior["value"]), 200, "OK")
+
+		const users = "/admin/v1/admin-users"
+		username := auth.ID()
+		body, _ := json.Marshal(dto{"username": username, "role": "support", "password": auth.ID(), "reason": "Test account"})
+		request("POST", users, "", "", origin, string(body), 401, "AUTH_REQUIRED")
+		request("POST", users, tech, "", origin, string(body), 403, "ACCESS_DENIED")
+		request("POST", users, super, "", origin, `{}`, 400, "BAD_REQUEST")
+		account, _ := request("POST", users, super, "", origin, string(body), 201, "OK")
+		createdID := account["id"].(string)
+		t.Cleanup(func() { exec("DELETE FROM admin_user WHERE id=?", createdID) })
+		itemPath := users + "/" + createdID
+		const suspend = `{"status":"disabled","reason":"Suspend test account","expectedVersion":1}`
+		request("PATCH", itemPath, "", "", origin, suspend, 401, "AUTH_REQUIRED")
+		request("PATCH", itemPath, tech, "", origin, suspend, 403, "ACCESS_DENIED")
+		request("PATCH", itemPath, super, "", origin, `{}`, 400, "BAD_REQUEST")
+		request("PATCH", itemPath, super, "", origin, suspend, 200, "OK")
+		request("PATCH", itemPath, super, "", origin, suspend, 409, "VERSION_CONFLICT")
+	})
 }

@@ -1,4 +1,4 @@
-import { APIError, Candidate, cancelJob, confirmUserIdentity, hasHistoryIdentity, id, isCurrentUser, loadConfig } from '../../services/api'
+import { APIError, Candidate, cancelJob, verifyUserIdentity, hasHistoryIdentity, id, isCurrentUser, loadConfig } from '../../services/api'
 import { stageHistory } from '../../services/history'
 import { ParseFailure, parseFlow } from '../../services/parse-flow'
 import { takeCleanupNotice } from '../../services/privacy'
@@ -6,11 +6,11 @@ import { latestSaveResult } from '../../services/save-progress'
 
 const names: Record<string, string> = { douyin: '抖音', xiaohongshu: '小红书', kuaishou: '快手', bilibili: 'B 站' }
 Page({
-  data: { text: '', pasted: false, maxLength: 0, parseWait: 0, inputReady: false, busy: false, error: '', job: '', feedbackTrace: '', cleanupNotice: '', sequence: 0, resumeResultId: '', candidates: [] as Candidate[], platforms: [] as { name: string; available: boolean }[] },
+  data: { text: '', pasted: false, maxLength: 0, parseWait: 0, inputReady: false, busy: false, error: '', job: '', feedbackTrace: '', cleanupNotice: '', notice: '', mock: false, sequence: 0, resumeResultId: '', candidates: [] as Candidate[], platforms: [] as { name: string; available: boolean; maintenance: boolean; message: string }[] },
   jobOwner: '',
   recoverySequence: 0,
-  onLoad() { this.setData({ cleanupNotice: takeCleanupNotice() }); void this.reloadConfig() },
-  onShow() { void this.refreshSaveRecovery() },
+  onLoad() { this.setData({ cleanupNotice: takeCleanupNotice() }) },
+  onShow() { void this.reloadConfig(); void this.refreshSaveRecovery() },
   onHide() { this.recoverySequence++ },
   onUnload() { this.recoverySequence++; void this.cancel() },
   async refreshSaveRecovery() {
@@ -18,16 +18,17 @@ Page({
     this.setData({ resumeResultId: '' })
     if (!hasHistoryIdentity()) return
     try {
-      const owner = await confirmUserIdentity(false)
+      const owner = await verifyUserIdentity(false)
       if (sequence === this.recoverySequence && isCurrentUser(owner)) this.setData({ resumeResultId: latestSaveResult(owner) })
     } catch { /* A recovery entry is visible once its owner is confirmed. */ }
   },
   async reloadConfig() {
     try {
       const config = await loadConfig()
-      this.setData({ inputReady: true, error: '', maxLength: config.limits.max_share_text_chars, parseWait: config.limits.client_parse_wait_seconds,
-        platforms: config.platforms.map(p => ({ name: names[p.platform] || p.platform, available: p.status === 'enabled' && (p.videoEnabled || p.imageEnabled) })) })
-    } catch (error) { this.setData({ error: (error as Error).message }) }
+      this.setData({ inputReady: true, notice: config.notice || '', mock: config.features.mock, maxLength: config.limits.max_share_text_chars, parseWait: config.limits.client_parse_wait_seconds,
+        platforms: config.platforms.map(p => ({ name: names[p.platform] || p.platform, available: p.status === 'enabled' && (p.videoEnabled || p.imageEnabled),
+          maintenance: p.status === 'maintenance', message: p.status === 'maintenance' ? p.maintenanceMessage || '平台维护中，请稍后再试' : '' })) })
+    } catch (error) { if (!this.data.inputReady) this.setData({ error: (error as Error).message }) }
   },
   edit(e: WechatMiniprogram.CustomEvent<{ value: string }>) { this.setData({ text: e.detail.value, pasted: false, feedbackTrace: '', candidates: [], error: '' }) },
   paste() {

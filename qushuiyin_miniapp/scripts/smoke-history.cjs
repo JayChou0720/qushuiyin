@@ -67,6 +67,7 @@ async function run() {
   assert.ok(!JSON.stringify(records()).includes('media.example.test'))
 
   client('pages/history/index.js')
+  const historyPage = page
   const event = { currentTarget: { dataset: { id: original.localId } } }
   await page.refresh()
   await page.open(event)
@@ -93,7 +94,40 @@ async function run() {
 
   full = true
   assert.equal(save(second), undefined, 'quota errors do not break the successful parse')
+  const progress = client('services/save-progress.js')
+  const operation = { userId: owner, resultId: second.result.resultId, flowId: api.id(), actionId: api.id(), assetIds: [second.result.assets[0].assetId],
+    batchId: api.id(), expiresAt: second.result.expiresAt, states: { 'local-item': 'SAVING' } }
+  const ids = new Set(operation.assetIds)
+  client('pages/result/index.js')
+  page.operation = operation
+  page.localFiles = new Map()
+  let writes = 0
+  wx.saveImageToPhotosAlbum = options => { writes++; options.success({}) }
+  page.persistSave(operation)
+  assert.equal(page.data.recoveryWarning, true)
+  await page.writeAlbum(operation, { itemId: 'local-item' }, { path: '/test.jpg', bytes: 6, mode: 'relay' }, 'image')
+  assert.equal(writes, 1, 'storage quota does not block saving to the album')
+  assert.equal(progress.loadSaveProgress(owner, operation.resultId, ids).states['local-item'], 'SUCCEEDED')
+  assert.equal(progress.loadSaveProgress('other-user', operation.resultId, ids), undefined)
   full = false
+  page.persistSave(operation)
+  assert.equal(page.data.recoveryWarning, false)
+  progress.clearSaveProgress(owner, operation.resultId)
+
+  client('pages/feedback/create.js')
+  wx.pageScrollTo = () => {}
+  await page.loadLimits()
+  page.choose({ detail: { value: '0' } })
+  page.editContent({ detail: { value: '本地验证未附带作品链接' } })
+  page.toggleSource({ detail: { value: ['source'] } })
+  page.editSource({ detail: { value: source } })
+  page.toggleSource({ detail: { value: [] } })
+  requests = []
+  await page.submit()
+  assert.ok(page.data.created)
+  const feedback = requests.find(req => req.path === '/v1/feedbacks').data
+  assert.equal(feedback.includeSource, false)
+  assert.equal(Object.hasOwn(feedback, 'sourceUrl'), false)
   client('pages/privacy/index.js')
   await page.initHistory()
   const turnOff = () => page.toggleHistory({ detail: { value: false } })
@@ -130,18 +164,33 @@ async function run() {
   assert.ok(files.has(dir + owner + '.' + newer.localId + '.img'))
   assert.ok(!JSON.stringify(records()).includes('mock-preview-ticket'))
   assert.equal(history.loadHistory(owner, { ...limits, history_max_count: 1 }).entries.length, 1)
-  storage.get(storageKey).entries[0].lastUsedAt -= (limits.history_ttl_days + 1) * 86400000
+  for (const item of storage.get(storageKey).entries) item.lastUsedAt -= (limits.history_ttl_days + 1) * 86400000
   assert.equal(records().length, 0)
+  assert.equal(limits.history_max_count, 100)
+  let lastEntry
+  for (let i = 0; i <= limits.history_max_count; i++) {
+    const synthetic = { ...second.result, resultId: 'result-' + i, contentId: 'work-' + i }
+    lastEntry = history.recordHistory({ ...second.context, resultId: synthetic.resultId }, synthetic, limits)
+  }
+  assert.equal(records().length, 100)
+  assert.equal(records()[0].localId, lastEntry.localId)
+  assert.equal(records().some(row => row.resultId === 'result-0'), false)
   storage.set('unrelated', 'keep')
   storage.set(storageKey, {schemaVersion: -1})
   assert.equal(records().length, 0)
   assert.equal(storage.has(storageKey), false)
   save(second)
+  const backupRecords = structuredClone(storage.get(storageKey))
   await client('services/privacy.js').clearServiceData()
   assert.equal(storage.has(storageKey), false)
   assert.equal(storage.get('unrelated'), 'keep')
   assert.notEqual(await api.confirmUserIdentity(), owner)
-  console.log('Mini-program history smoke passed: reuse, replay, retention, privacy, quota, and scoped cleanup.')
+  storage.set(storageKey, backupRecords)
+  page = historyPage
+  await page.refresh()
+  assert.equal(page.data.rows.length, 0, 'an identity change hides records in a different partition')
+  assert.ok(storage.has(storageKey))
+  console.log('Mini-program data smoke passed: history retention, identity switching, album storage fallback, feedback consent, and scoped cleanup.')
 }
 
 run().catch(error => { console.error(error); process.exitCode = 1 })

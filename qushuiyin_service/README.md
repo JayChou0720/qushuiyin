@@ -1,5 +1,25 @@
 # Go 服务：本地开发
 
+## M4：管理端
+
+Vue 管理端与 API 使用同一个 Go 服务发布。在 `qushuiyin_service` 目录依次执行：
+
+```powershell
+npm --prefix web/admin ci
+npm --prefix web/admin run build
+go build -o bin/qushuiyin-server.exe ./cmd/qushuiyin-server
+```
+
+Vite 输出到 `internal/admin/dist`，Go 构建时将页面和静态资源嵌入可执行文件。本地启动服务后访问 `http://127.0.0.1:18080/admin/`。发布制品使用嵌入构建，仓库只提交占位首页和前端源码。部署反向代理时保留管理端 Host、用 HTTPS 提供页面，并按入口配置 `ADMIN_PUBLIC_HOST` 和 `ADMIN_ALLOWED_ORIGINS`。当前仓库的服务入口限回环开发、测试环境。
+
+开发联调可设 `ADMIN_ALLOWED_ORIGINS=http://127.0.0.1:5173` 后启动本地 API，在 `web/admin` 目录运行 `npm run dev -- --host 127.0.0.1`。Vite 代理 `/admin/v1`，默认目标为 `http://127.0.0.1:8080`，本项目的默认 Mock 端口需设置 `ADMIN_API_TARGET=http://127.0.0.1:18080`。
+
+下载域名页按平台显示以出现次数加权的未登记占比。请在微信公众平台登记后，再将主机标为「已登记」。平台管理允许技术管理员配置已支持的分享域名、内容能力和交付方式，运营可发布维护文案。变更提交须填写原因，版本冲突时刷新记录并重新编辑。
+
+系统配置支持同批发布相互依赖的值。历史值可加入草稿并发布为新版本。页面标明生效方式，包括进程启动时分配的 worker、解析缓存、HTTP 和上游传输参数，以及当前版本未接入的预留配置。超时或并发参数变更期间，已经领取的媒体工作继续使用领取时的字节上限。直连预览由 `direct_preview_enabled` 控制。应用首页和帮助页读取公开公告、帮助和维护文案，刷新间隔按客户端配置缓存时限执行。最近记录与保存恢复入口通过 `GET /v1/me` 确认可用的本人会话后再显示。
+
+备份恢复前的删除重放见 [删除标记恢复流程](doc/restore-deletions.md)。
+
 ## M1：小程序 Mock 联调
 
 Windows 下，从仓库根目录启动。脚本需要 Go 和 MySQL 8.4（`mysqld.exe` 需在 PATH 中），会启动隔离的开发库（默认端口 33316），执行迁移与开发种子，并在 `http://127.0.0.1:18080` 提供 Mock API 和样本文件。现有 MySQL 不会被改动。
@@ -23,13 +43,13 @@ node ./qushuiyin_service/scripts/smoke-mock.mjs
 
 管理员账号与小程序账号分开。设置本机 `MYSQL_DSN` 并迁移后，用 `qushuiyin-server admin create --username ops --role super_admin` 创建首个管理员；终端会要求两次不回显的密码输入。管理会话仅通过 `/admin` 路径的安全 Cookie 签发，修改请求校验 `Origin`。管理员接口的 MySQL 集成测试使用 `MYSQL_TEST_DSN`，只对本地 `qushuiyin_test` 运行。
 
-客服、运营和超级管理员可筛选 `GET /admin/v1/feedbacks?status=pending&category=download_failed`，或访问工单详情。修改工单提交 `{expectedVersion,status?,reply?,reason}`，原因不要填写用户的链接或联系方式。工单关闭后按配置缩短保留期；仅超级管理员和审计角色可用 `GET /admin/v1/audit-logs?targetType=feedback&targetId=...` 查看脱敏审计。`go test -run TestAdminFeedbackMySQL ./internal/httpapi` 验证接口权限与回复流程。
+客服、运营和超级管理员可筛选 `GET /admin/v1/feedbacks?status=pending&category=download_failed`，或访问工单详情。修改工单提交 `{expectedVersion,status?,reply?,reason}`，原因不要填写用户的链接或联系方式。超级管理员可填写原因查看用户同意附带的来源、联系方式和追踪号，每次访问单独记入脱敏审计。工单关闭后按配置缩短保留期。仅超级管理员和审计角色可用 `GET /admin/v1/audit-logs?targetType=feedback&targetId=...` 查看脱敏审计。`go test -run TestAdminFeedbackMySQL ./internal/httpapi` 验证接口权限与回复流程。
 
 同一个接口脚本还使用独立的开发身份验证反馈、事件和数据清理。反馈链接只在明确附带时接受；反馈与事件写入本地 MySQL。Mock 事件暂用以下值：`stage` 为 `result/preview/save/download/album`，`outcome` 为 `started/succeeded/failed/cancelled/partial/unknown`，`osFamily` 为 `ios/android/windows/macos/devtools/unknown`。重复事件按用户与事件 ID 判定；本人失败解析可用 `error.traceId` 关联反馈。
 
 在模拟器中，从「使用帮助」进入「提交反馈」或「我的反馈」。提交测试反馈后会显示工单编号；通过本地管理接口回复该工单，再打开「我的反馈」，可核对状态、最新回复和回复时间。附带作品链接默认未勾选，取消勾选会清除已输入的链接。
 
-清理请求撤销本地开发用户的会话和票据，并记录可在重启后继续处理的任务；共用的合成样本不受影响。`go test -run TestMockPrivacyMySQL ./internal/httpapi` 使用隔离测试库验证删除边界。该测试不覆盖真实媒体文件和备份恢复。
+清理请求撤销本地开发用户的会话和票据，并记录可在重启后继续处理的任务；共用的合成样本不受影响。`go test -run TestMockPrivacyMySQL ./internal/httpapi` 使用隔离测试库验证删除边界。同库隔离恢复演练由 `TestAdminFeedbackMySQL` 验证，涵盖旧会话、用户反馈和管理端敏感详情。
 
 首页或「使用帮助」可以打开「数据与隐私」。「清理本机缓存」清理小程序跟踪的临时下载和缩略图，保留记录文字；「清除服务端数据」需要确认，并清除当前身份的本机记录。使用独立测试身份复测时，先解析示例或提交测试反馈，再发起清除。成功后小程序回到首页，显示访问已停止和在线副本的计划清理期限；旧反馈和本服务签发的媒体票据均不能再访问。
 

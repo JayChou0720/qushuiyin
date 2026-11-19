@@ -9,9 +9,11 @@ interface Envelope<T> { code: string; message: string; requestId: string; data: 
 export interface Candidate { url: string; displayHost: string; platform: string }
 export interface PublicConfig {
   privacyVersion: string
+  notice?: string
+  help?: { message: string }
   features: { mock: boolean; devLogin: boolean }
-  limits: EventLimits & { max_share_text_chars: number; max_image_batch_count: number; client_parse_wait_seconds: number; client_download_timeout_seconds: number; max_video_bytes: number; max_image_bytes: number; poll_interval_ms: number; feedback_min_chars: number; feedback_max_chars: number; feedback_contact_max_chars: number; history_max_count: number; history_ttl_days: number; thumbnail_local_budget_bytes: number }
-  platforms: { platform: string; status: string; videoEnabled: boolean; imageEnabled: boolean }[]
+  limits: EventLimits & { config_client_cache_seconds: number; max_share_text_chars: number; max_image_batch_count: number; client_parse_wait_seconds: number; client_download_timeout_seconds: number; max_video_bytes: number; max_image_bytes: number; poll_interval_ms: number; feedback_min_chars: number; feedback_max_chars: number; feedback_contact_max_chars: number; history_max_count: number; history_ttl_days: number; thumbnail_local_budget_bytes: number }
+  platforms: { platform: string; status: string; videoEnabled: boolean; imageEnabled: boolean; maintenanceMessage?: string }[]
 }
 interface Session { userId: string; token: string; expiresAt: string }
 interface CleanupReceipt { accessRevoked: true; cleanupStatus: 'scheduled'; cleanupDeadlineAt: string }
@@ -39,6 +41,8 @@ export class ConnectionError extends Error {}
 let session: Session | undefined
 let loggingIn: Promise<Session> | undefined
 let cached: PublicConfig | undefined
+let configLoadedAt = 0
+let loadingConfig: Promise<PublicConfig> | undefined
 let identityEpoch = 0
 let deleting = false
 let deletionTarget: Session | undefined
@@ -63,9 +67,16 @@ function call<T>(method: Method, path: string, data?: object, key?: string, cred
     })
   })
 }
-export async function loadConfig() {
-  cached = await call<PublicConfig>('GET', '/v1/config')
-  return cached
+export function loadConfig() {
+  if (cached && Date.now() - configLoadedAt < cached.limits.config_client_cache_seconds * 1000) return Promise.resolve(cached)
+  return loadingConfig ??= call<PublicConfig>('GET', '/v1/config').then(config => {
+    cached = config
+    configLoadedAt = Date.now()
+    return config
+  }).catch(error => {
+    if (cached && error instanceof ConnectionError) return cached
+    throw error
+  }).finally(() => { loadingConfig = undefined })
 }
 export const feedbackConfig = () => cached ? Promise.resolve(cached) : loadConfig()
 export const cachedEventLimits = () => cached?.limits
@@ -125,6 +136,11 @@ export async function confirmUserIdentity(allowNew = true) {
   if (deleting) throw new Error('正在清除数据，请稍后再试')
   const { userId } = await login(allowNew)
   if (epoch !== identityEpoch || !isCurrentUser(userId)) throw new Error('当前使用身份已变更，请重试')
+  return userId
+}
+export async function verifyUserIdentity(allowNew = true) {
+  const { data, userId } = await authenticatedRequest<{ userId: string }>('GET', '/v1/me', undefined, undefined, undefined, allowNew)
+  if (data?.userId !== userId || !isCurrentUser(userId)) throw new Error('当前使用身份已变更，请重试')
   return userId
 }
 export async function revokeMyData() {

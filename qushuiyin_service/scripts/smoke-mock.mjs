@@ -31,8 +31,11 @@ for (const name of ['history_max_count','history_ttl_days','thumbnail_local_budg
   assert.ok(Number.isSafeInteger(config.limits[name]) && config.limits[name] > 0, name)
 }
 const createSession = () => request('POST','/v1/sessions/wechat',{data:{code:'dev:smoke-'+randomUUID(),clientVersion:'smoke',privacyVersion:config.privacyVersion}})
-const { token } = await createSession()
+const { token, userId } = await createSession()
 const other = (await createSession()).token
+await request('GET','/v1/me',{expect:401,code:'AUTH_REQUIRED'})
+assert.equal((await request('GET','/v1/me',{token})).userId, userId)
+assert.notEqual((await request('GET','/v1/me',{token:other})).userId, userId)
 const input = shareText => ({ shareText, selectedUrl: null, source: 'manual', forceRefresh: false, flowId: randomUUID() })
 const create = (data, key = randomUUID(), owner = token) => request('POST','/v1/parse-jobs',{token:owner,data,key,expect:202})
 const jobPath = j => '/v1/parse-jobs/' + j.jobId
@@ -242,6 +245,7 @@ const cleanup=await request('DELETE',dataPath,{token})
 assert.equal(cleanup.accessRevoked,true)
 assert.equal(cleanup.cleanupStatus,'scheduled')
 assert.ok(Date.parse(cleanup.cleanupDeadlineAt)>Date.now())
+await request('GET','/v1/me',{token,expect:401,code:'SESSION_EXPIRED'})
 await request('DELETE',dataPath,{token,expect:401,code:'SESSION_EXPIRED'})
 await request('GET',detailPath,{token,expect:401,code:'SESSION_EXPIRED'})
 await request('GET',feedbackPath,{token:other})

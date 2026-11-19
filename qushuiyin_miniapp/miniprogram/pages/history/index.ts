@@ -1,4 +1,4 @@
-import { APIError, PublicConfig, cancelJob, confirmUserIdentity, id, isCurrentUser, loadConfig, queryResult } from '../../services/api'
+import { APIError, PublicConfig, cancelJob, verifyUserIdentity, id, isCurrentUser, loadConfig, queryResult } from '../../services/api'
 import { HistoryEntry, clearHistoryRecords, deleteHistoryItem, loadHistory, stageHistory, thumbnailPath, touchHistory } from '../../services/history'
 import { parseFlow } from '../../services/parse-flow'
 
@@ -23,7 +23,7 @@ Page({
     this.owner = ''; this.entries = []
     this.setData({ rows: [], loading: true, busy: false, error: '', notice: '' })
     try {
-      const [owner, config] = await Promise.all([confirmUserIdentity(), loadConfig()])
+      const [owner, config] = await Promise.all([verifyUserIdentity(), loadConfig()])
       if (this.revision !== n || !isCurrentUser(owner)) return
       this.owner = owner; this.config = config
       this.renderRows()
