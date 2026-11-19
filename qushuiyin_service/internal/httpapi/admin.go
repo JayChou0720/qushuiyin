@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"errors"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -33,13 +32,13 @@ func setAdminCookie(w http.ResponseWriter, token string, expires time.Time, maxA
 	http.SetCookie(w, &http.Cookie{Name: adminCookie, Value: token, Path: "/admin", Expires: expires, MaxAge: maxAge, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 }
 func (s *Mock) adminLogin(w http.ResponseWriter, r *http.Request) {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
+	ip := s.clientIP(r)
+	if !ip.IsValid() {
 		fail(w, 403, "ACCESS_DENIED")
 		return
 	}
 	s.mu.Lock()
-	allowed := s.minute("admin-login:"+host, s.settings().Int("ip_admin_login_requests_per_minute"))
+	allowed := s.minute("admin-login:"+ip.String(), s.settings().Int("ip_admin_login_requests_per_minute"))
 	s.mu.Unlock()
 	if !allowed {
 		fail(w, 429, "RATE_LIMITED")
@@ -70,7 +69,7 @@ func (s *Mock) adminLogin(w http.ResponseWriter, r *http.Request) {
 		store.Lockout = settings.Seconds("admin_lockout_seconds")
 		store.MaxFailures = settings.Int("admin_login_max_failures")
 	}
-	a, token, expires, err := store.Login(r.Context(), req.Username, password, host)
+	a, token, expires, err := store.Login(r.Context(), req.Username, password, ip.String())
 	if errors.Is(err, auth.ErrAdminLogin) {
 		fail(w, 401, "ADMIN_LOGIN_FAILED")
 		return

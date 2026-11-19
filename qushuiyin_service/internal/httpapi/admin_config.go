@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"qushuiyin/service/internal/auth"
 	"qushuiyin/service/internal/config"
@@ -30,14 +31,36 @@ type configEntry struct {
 
 func displayKey(key string) bool { return oneOf(key, "public_notice", "public_help") }
 func editableConfig(role, key string) bool {
-	return role == "super_admin" || (role == "tech_admin" && (displayKey(key) || key == "direct_preview_enabled")) ||
-		(role == "operator" && displayKey(key))
+	if reservedConfig(key) {
+		return false
+	}
+	switch role {
+	case "super_admin":
+		return true
+	case "tech_admin":
+		return !criticalConfig(key)
+	case "operator":
+		return displayKey(key)
+	}
+	return false
+}
+
+func criticalConfig(key string) bool {
+	return strings.HasSuffix(key, "_egress_per_day_bytes") ||
+		strings.HasSuffix(key, "_per_minute") || strings.HasSuffix(key, "_per_day") ||
+		strings.HasPrefix(key, "upstream_challenge_") || strings.HasPrefix(key, "admin_login_") ||
+		strings.Contains(key, "_retention_") ||
+		oneOf(key, "admin_lockout_seconds", "session_ttl_seconds", "admin_session_ttl_seconds",
+			"max_video_bytes", "relay_max_video_bytes", "max_image_bytes", "max_image_pixels",
+			"media_cache_budget_bytes", "disk_high_watermark_percent", "max_request_body_bytes")
 }
 
 func configUnit(key string) string {
 	switch {
 	case displayKey(key):
 		return "文本"
+	case key == "max_display_text_chars":
+		return "字符"
 	case key == "direct_preview_enabled":
 		return "开关"
 	case strings.Contains(key, "_seconds"):
@@ -299,6 +322,12 @@ func (s *Mock) adminConfigUpdate(w http.ResponseWriter, r *http.Request, a auth.
 	if err := validateConfigRelations(next); err != nil {
 		send(w, 400, "BAD_REQUEST", nil, dto{"reason": err.Error()})
 		return
+	}
+	for _, key := range []string{"public_notice", "public_help"} {
+		if int64(utf8.RuneCountInString(next.Text(key))) > next.Int("max_display_text_chars") {
+			send(w, 400, "BAD_REQUEST", nil, dto{"key": key, "reason": "展示文案超过 max_display_text_chars 字符上限"})
+			return
+		}
 	}
 	for _, change := range req.Changes {
 		x := byKey[change.Key]

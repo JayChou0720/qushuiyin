@@ -75,10 +75,10 @@ func TestAdminFeedbackMySQL(t *testing.T) {
 		return id, token
 	}
 	supportID, support := seedAdmin("support")
-	_, operator := seedAdmin("operator")
+	operatorID, operator := seedAdmin("operator")
 	_, auditor := seedAdmin("auditor")
 	_, viewer := seedAdmin("viewer")
-	_, tech := seedAdmin("tech_admin")
+	techID, tech := seedAdmin("tech_admin")
 	superID, super := seedAdmin("super_admin")
 	owner, err := store.DevLogin(ctx, auth.ID())
 	if err != nil {
@@ -329,11 +329,33 @@ func TestAdminFeedbackMySQL(t *testing.T) {
 			t.Fatal("platform changes were not returned")
 		}
 
-		t.Cleanup(func() { exec("DELETE FROM system_config WHERE operator_id=?", superID) })
+		t.Cleanup(func() { exec("DELETE FROM system_config WHERE operator_id IN (?,?,?)", superID, techID, operatorID) })
 		configPath := "/admin/v1/config"
+		currentConfig, _ := request("GET", configPath, super, "", "", "", 200, "OK")
+		entries := map[string]map[string]any{}
+		for _, item := range currentConfig["items"].([]any) {
+			row := item.(map[string]any)
+			entries[row["key"].(string)] = row
+		}
+		change := func(key string, value any) string {
+			body, _ := json.Marshal(dto{"reason": "Test configuration permissions", "changes": []dto{{"key": key, "expectedVersion": entries[key]["version"], "value": value}}})
+			return string(body)
+		}
+		reserved := entries["parser_transient_retries"]
+		if reserved["reserved"] != true || reserved["editable"] != false {
+			t.Fatal("reserved key should be read-only even for super_admin")
+		}
+		request("PATCH", configPath, super, "", origin, change("parser_transient_retries", 0), 403, "ACCESS_DENIED")
+		workers := change("parser_workers", entries["parser_workers"]["value"])
+		request("PATCH", configPath, operator, "", origin, workers, 403, "ACCESS_DENIED")
+		request("PATCH", configPath, tech, "", origin, workers, 200, "OK")
+		limitChars := int(values.Int("max_display_text_chars"))
+		request("PATCH", configPath, operator, "", origin, change("public_help", strings.Repeat("😀", limitChars+1)), 400, "BAD_REQUEST")
+		request("PATCH", configPath, operator, "", origin, change("public_help", strings.Repeat("😀", limitChars)), 200, "OK")
+		request("PATCH", configPath, tech, "", origin, change("max_display_text_chars", limitChars-1), 400, "BAD_REQUEST")
 		const invalidConfig = `{"reason":"invalid","changes":[{"key":"public_notice","expectedVersion":1,"value":12}]}`
 		request("PATCH", configPath, super, "", origin, invalidConfig, 400, "BAD_REQUEST")
-		request("PATCH", configPath, tech, "", origin, `{"reason":"no permission","changes":[{"key":"parser_workers","expectedVersion":1,"value":2}]}`, 403, "ACCESS_DENIED")
+		request("PATCH", configPath, tech, "", origin, `{"reason":"no permission","changes":[{"key":"max_video_bytes","expectedVersion":1,"value":104857600}]}`, 403, "ACCESS_DENIED")
 		versions, _ := request("GET", configPath+"/public_notice/versions", operator, "", "", "", 200, "OK")
 		prior := versions["items"].([]any)[0].(map[string]any)
 		publish := func(version float64, value any) string {

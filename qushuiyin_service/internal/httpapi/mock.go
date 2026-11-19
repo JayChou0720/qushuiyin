@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,6 +46,7 @@ type Mock struct {
 	Admin            auth.AdminStore
 	AdminHost        string
 	AdminOrigins     map[string]bool
+	TrustedProxies   []netip.Prefix
 	adminHashSlots   chan struct{}
 	Settings         config.Values
 	ManagedConfig    bool
@@ -222,8 +223,8 @@ func (s *Mock) login(w http.ResponseWriter, r *http.Request) {
 	}
 	name, prefix := strings.CutPrefix(req.Code, "dev:")
 	name = strings.TrimSpace(name)
-	host, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if !s.DevLogin || !config.LoopbackHost(host) || !prefix || name == "" || utf8.RuneCountInString(name) > 64 {
+	ip := s.clientIP(r)
+	if !s.DevLogin || !peerIP(r).IsLoopback() || !ip.IsLoopback() || !prefix || name == "" || utf8.RuneCountInString(name) > 64 {
 		fail(w, 400, "BAD_REQUEST")
 		return
 	}
@@ -232,7 +233,7 @@ func (s *Mock) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	allowed := s.minute("login:"+host, s.settings().Int("ip_login_requests_per_minute"))
+	allowed := s.minute("login:"+ip.String(), s.settings().Int("ip_login_requests_per_minute"))
 	s.mu.Unlock()
 	if !allowed {
 		fail(w, 429, "RATE_LIMITED")
