@@ -39,6 +39,7 @@ type Mock struct {
 	TaskKeyVersion   string
 	Relay            *media.Relay
 	mediaConnections map[string]int64
+	mediaWork        chan struct{}
 	byteBudgets      map[string]*ticketBudget
 	Admin            auth.AdminStore
 	AdminHost        string
@@ -269,6 +270,7 @@ func (s *Mock) Handler(ctx context.Context) http.Handler {
 	s.keys = map[string]idem{}
 	s.rates = map[string]meter{}
 	s.mediaConnections = map[string]int64{}
+	s.mediaWork = make(chan struct{}, s.Settings.Int("media_workers"))
 	m := http.NewServeMux()
 	if s.Admin.DB != nil && s.AdminHost != "" {
 		s.adminRoutes(m)

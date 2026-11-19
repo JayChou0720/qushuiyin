@@ -46,6 +46,9 @@ type Relay struct {
 	deleting           map[string]bool
 	usageLoaded        bool
 	loadingUsage       chan struct{}
+	usageIdle          chan struct{}
+	usageChanges       int
+	usageRevision      uint64
 	used, reserved     int64
 	imageSlots         chan struct{}
 }
@@ -67,25 +70,26 @@ func (r *Relay) shareKey(id FileIdentity, version string, a parse.Asset) string 
 
 // Only this module chooses paths. The identity comes from the authorized result.
 func (r *Relay) Prepare(ctx context.Context, id FileIdentity, version string, a parse.Asset) (Prepared, error) {
-	return r.prepare(ctx, id, version, a, false)
-}
-
-func (r *Relay) PrepareThumbnail(ctx context.Context, id FileIdentity, version string, a parse.Asset) (Prepared, error) {
-	ctx, cancel := context.WithTimeout(ctx, r.Settings.Seconds("thumbnail_generate_timeout_seconds"))
-	defer cancel()
-	edge := strconv.FormatInt(r.Settings.Int("thumbnail_max_edge_px"), 10)
-	quality := strconv.FormatInt(r.Settings.Int("thumbnail_jpeg_quality"), 10)
-	return r.prepare(ctx, id, "thumb-"+edge+"-"+quality+"-"+version, a, true)
-}
-
-func (r *Relay) prepare(ctx context.Context, id FileIdentity, version string, a parse.Asset, thumbnail bool) (Prepared, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.Settings.Seconds("media_fetch_timeout_seconds"))
 	defer cancel()
+	return r.prepare(ctx, ctx, id, version, a, false)
+}
+
+func (r *Relay) PrepareThumbnail(ctx, queued context.Context, id FileIdentity, version string, a parse.Asset) (Prepared, error) {
+	edge := strconv.FormatInt(r.Settings.Int("thumbnail_max_edge_px"), 10)
+	quality := strconv.FormatInt(r.Settings.Int("thumbnail_jpeg_quality"), 10)
+	return r.prepare(ctx, queued, id, "thumb-"+edge+"-"+quality+"-"+version, a, true)
+}
+
+func (r *Relay) prepare(ctx, queued context.Context, id FileIdentity, version string, a parse.Asset, thumbnail bool) (Prepared, error) {
 	if id.ContentID == "" && (id.UserID == "" || id.ResultID == "" || id.AssetID == "") {
 		return Prepared{}, errors.New("missing private media identity")
 	}
 	share := r.shareKey(id, version, a)
 	for {
+		if err := queued.Err(); err != nil {
+			return Prepared{}, err
+		}
 		r.mu.Lock()
 		if r.pending == nil {
 			r.pending = map[string]chan struct{}{}
@@ -95,8 +99,8 @@ func (r *Relay) prepare(ctx context.Context, id FileIdentity, version string, a 
 			select {
 			case <-wait:
 				continue
-			case <-ctx.Done():
-				return Prepared{}, ctx.Err()
+			case <-queued.Done():
+				return Prepared{}, queued.Err()
 			}
 		}
 		done := make(chan struct{})
@@ -105,6 +109,13 @@ func (r *Relay) prepare(ctx context.Context, id FileIdentity, version string, a 
 		defer func() { r.mu.Lock(); delete(r.pending, share); close(done); r.mu.Unlock() }()
 		break
 	}
+	var imageWait *time.Duration
+	if queueDeadline, ok := queued.Deadline(); thumbnail && ok {
+		remaining := time.Until(queueDeadline)
+		imageWait = &remaining
+	}
+	ctx, cancel := context.WithTimeout(ctx, r.Settings.Seconds("media_fetch_timeout_seconds"))
+	defer cancel()
 	var existing Prepared
 	err := r.DB.QueryRowContext(ctx, "SELECT id,storage_key,mime_type,size_bytes,sha256,converted,expires_at FROM media_file WHERE share_key=? AND output_version=? AND status='ready' AND expires_at>UTC_TIMESTAMP(3)", share, version).Scan(&existing.ID, &existing.StorageKey, &existing.MIME, &existing.Size, &existing.Hash, &existing.Converted, &existing.Expires)
 	if err == nil {
@@ -138,10 +149,9 @@ func (r *Relay) prepare(ctx context.Context, id FileIdentity, version string, a 
 	if err != nil {
 		return Prepared{}, err
 	}
-	var committed int64
 	var releaseFile func()
 	defer func() {
-		release(committed)
+		release()
 		if releaseFile != nil {
 			releaseFile()
 		}
@@ -157,7 +167,7 @@ func (r *Relay) prepare(ctx context.Context, id FileIdentity, version string, a 
 		if e != nil {
 			return Prepared{}, e
 		}
-		file, e := r.fetchOutputTo(ctx, source, a.Kind, storageKey, thumbnail)
+		file, e := r.fetchOutputTo(ctx, source, a.Kind, storageKey, thumbnail, imageWait)
 		if e != nil {
 			hold()
 			if errors.Is(e, errAnimatedWebP) {
@@ -181,16 +191,21 @@ func (r *Relay) prepare(ctx context.Context, id FileIdentity, version string, a 
 		if e == nil {
 			_, e = tx.ExecContext(ctx, "INSERT INTO media_file(id,share_key,output_version,storage_key,status,mime_type,size_bytes,sha256,converted,ready_at,expires_at,last_access_at) VALUES (?,?,?,?,'ready',?,?,?,?,?,?,?)", file.ID, share, version, file.StorageKey, file.MIME, file.Size, file.Hash, file.Converted, now, file.Expires, now)
 		}
-		if e == nil {
-			e = tx.Commit()
-		} else {
-			tx.Rollback()
-		}
 		if e != nil {
+			tx.Rollback()
 			_ = os.Remove(filepath.Join(r.Directory, file.StorageKey))
 			return Prepared{}, e
 		}
-		committed = file.Size
+		finish := r.beginUsageChange()
+		e = tx.Commit()
+		if e != nil {
+			finish(0, false)
+			// A lost commit acknowledgment can still leave a ready row. Keep its
+			// file intact; the orphan sweep handles a transaction that rolled back.
+			_ = r.calibrateUsage(context.WithoutCancel(ctx))
+			return Prepared{}, e
+		}
+		finish(file.Size, true)
 		return file, nil
 	}
 	if last == nil {
@@ -222,7 +237,7 @@ func (r *Relay) fetch(ctx context.Context, source, kind string) (Prepared, error
 }
 
 func (r *Relay) fetchOutput(ctx context.Context, source, kind string, thumbnail bool) (Prepared, error) {
-	return r.fetchOutputTo(ctx, source, kind, auth.ID()+".media", thumbnail)
+	return r.fetchOutputTo(ctx, source, kind, auth.ID()+".media", thumbnail, nil)
 }
 
 func (r *Relay) relaySizeError(kind string, size int64) error {
@@ -232,7 +247,7 @@ func (r *Relay) relaySizeError(kind string, size int64) error {
 	return errors.New("FILE_TOO_LARGE")
 }
 
-func (r *Relay) fetchOutputTo(ctx context.Context, source, kind, key string, thumbnail bool) (Prepared, error) {
+func (r *Relay) fetchOutputTo(ctx context.Context, source, kind, key string, thumbnail bool, imageWait *time.Duration) (Prepared, error) {
 	var out Prepared
 	resp, err := r.Client.Headers(ctx, source, http.MethodGet, "", func(u *url.URL) bool { return outbound.HTTPS(u) })
 	if err != nil {
@@ -292,7 +307,7 @@ func (r *Relay) fetchOutputTo(ctx context.Context, source, kind, key string, thu
 			return out, err
 		}
 	} else {
-		actual, err = r.processImage(ctx, part, actual, thumbnail)
+		actual, err = r.processImage(ctx, part, actual, thumbnail, imageWait)
 		if err != nil {
 			return out, err
 		}
@@ -326,16 +341,47 @@ type limitedProbeOutput struct {
 	limit int
 }
 
-// Bootstrap from existing rows once, before any reservation or GC mutation.
-// Failed reads can be retried without keeping unrelated transfers under a lock.
-func (r *Relay) loadUsage(ctx context.Context) error {
-	for {
+// Commit and deletion can overlap. Reject a SUM snapshot if either crossed
+// its read, so a registration or deletion is never counted twice.
+func (r *Relay) beginUsageChange() func(int64, bool) {
+	r.mu.Lock()
+	if r.usageChanges == 0 {
+		r.usageIdle = make(chan struct{})
+	}
+	r.usageChanges++
+	r.usageRevision++
+	r.mu.Unlock()
+	return func(delta int64, confirmed bool) {
 		r.mu.Lock()
-		if r.usageLoaded {
+		if confirmed {
+			r.used += delta
+		} else {
+			r.usageLoaded = false
+		}
+		r.usageChanges--
+		if r.usageChanges == 0 {
+			close(r.usageIdle)
+			r.usageIdle = nil
+		}
+		r.mu.Unlock()
+	}
+}
+
+func (r *Relay) refreshUsage(ctx context.Context, force bool) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		r.mu.Lock()
+		if r.usageLoaded && !force {
 			r.mu.Unlock()
 			return nil
 		}
-		if wait := r.loadingUsage; wait != nil {
+		wait := r.loadingUsage
+		if wait == nil {
+			wait = r.usageIdle
+		}
+		if wait != nil {
 			r.mu.Unlock()
 			select {
 			case <-wait:
@@ -346,41 +392,56 @@ func (r *Relay) loadUsage(ctx context.Context) error {
 		}
 		done := make(chan struct{})
 		r.loadingUsage = done
+		revision := r.usageRevision
 		r.mu.Unlock()
 
 		var used int64
 		err := r.DB.QueryRowContext(ctx, "SELECT COALESCE(SUM(size_bytes),0) FROM media_file").Scan(&used)
 
 		r.mu.Lock()
-		if err == nil {
+		stable := r.usageRevision == revision
+		if err == nil && stable {
 			r.used = used
 			r.usageLoaded = true
 		}
 		r.loadingUsage = nil
 		close(done)
 		r.mu.Unlock()
-		return err
+		if err != nil || stable {
+			return err
+		}
 	}
 }
 
-func (r *Relay) reserve(ctx context.Context, kind string) (func(int64), error) {
+func (r *Relay) calibrateUsage(ctx context.Context) error {
+	check, cancel := context.WithTimeout(ctx, r.Settings.Seconds("database_operation_timeout_seconds"))
+	defer cancel()
+	return r.refreshUsage(check, true)
+}
+
+func (r *Relay) reserve(ctx context.Context, kind string) (func(), error) {
 	limit := r.Settings.Int("max_image_bytes")
 	if kind == "video" {
 		limit = r.Settings.Int("relay_max_video_bytes")
 	}
-	if err := r.loadUsage(ctx); err != nil {
-		return nil, err
+	for {
+		if err := r.refreshUsage(ctx, false); err != nil {
+			return nil, err
+		}
+		r.mu.Lock()
+		if r.usageLoaded {
+			break
+		}
+		r.mu.Unlock()
 	}
-	r.mu.Lock()
 	defer r.mu.Unlock()
 	if limit <= 0 || limit > r.Settings.Int("media_cache_budget_bytes")-r.used-r.reserved {
 		return nil, errors.New("SERVICE_BUSY")
 	}
 	r.reserved += limit
-	return func(committed int64) {
+	return func() {
 		r.mu.Lock()
 		r.reserved -= limit
-		r.used += committed
 		r.mu.Unlock()
 	}, nil
 }

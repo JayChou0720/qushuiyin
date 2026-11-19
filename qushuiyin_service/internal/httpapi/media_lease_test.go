@@ -3,13 +3,54 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"maps"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"qushuiyin/service/internal/auth"
 )
+
+func TestBatchLockWaitStopsWhenRequestDisconnects(t *testing.T) {
+	s := &Mock{Persistent: true}
+	unlock := s.batchGates.lock("owner")
+	defer unlock()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/save-batches", nil)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		s.persistentBatchRequest(httptest.NewRecorder(), r, credential{User: "owner"}, func(http.ResponseWriter, *http.Request, credential) {
+			t.Error("disconnected request reached the endpoint")
+		})
+	}()
+	cancel()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("request remained behind the user lock")
+	}
+}
+
+func TestMediaLeaseRetriesDatabaseErrorsUntilClaimIsLost(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	now := time.Now()
+	attempts := 0
+	kept := keepMediaLease(ctx, now.Add(200*time.Millisecond), now.Add(time.Minute), 400*time.Millisecond, time.Millisecond, func(ctx context.Context, _ time.Time) (int64, error) {
+		attempts++
+		if attempts == 1 {
+			return 0, errors.New("temporary database failure")
+		}
+		return 0, nil
+	})
+	if kept || attempts != 2 {
+		t.Fatalf("wanted one retry before accepting the lost claim, got %v after %d attempts", kept, attempts)
+	}
+}
 
 func TestPersistentMediaRenewsLeaseMySQL(t *testing.T) {
 	h := newDeliveryHarness(t)

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"image"
+	"image/color"
 	"image/png"
 	"io"
 	"net/http"
@@ -14,6 +16,26 @@ import (
 	"qushuiyin/service/internal/outbound"
 	"qushuiyin/service/internal/parse"
 )
+
+type interruptingImage struct {
+	image.Image
+	interrupt context.CancelFunc
+}
+
+func (i interruptingImage) At(x, y int) color.Color {
+	i.interrupt()
+	return i.Image.At(x, y)
+}
+
+func TestThumbnailScaleObservesCancellationBetweenRows(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	dst := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	src := interruptingImage{image.NewRGBA(image.Rect(0, 0, 8, 8)), cancel}
+	if err := scaleThumbnail(ctx, dst, src); !errors.Is(err, context.Canceled) || dst.RGBAAt(0, 1).A != 0 {
+		t.Fatal("scaling continued after cancellation", err)
+	}
+}
 
 func TestThumbnailPixelAndWorkerLimits(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 960, 240))

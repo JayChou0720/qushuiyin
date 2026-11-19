@@ -226,6 +226,30 @@ func TestDeliveryDirectFallbackMySQL(t *testing.T) {
 	}
 }
 
+func TestTicketCountingToleratesAnotherItemPublicationMySQL(t *testing.T) {
+	h := newDeliveryHarness(t)
+	h.register("registered")
+	b, itemID, _ := h.batch()
+	r := httptest.NewRequest(http.MethodPost, "/v1/save-batches/"+b+"/tickets", strings.NewReader(`{"itemIds":["`+itemID+`"]}`))
+	r.Pattern = "POST /v1/save-batches/{batchId}/tickets"
+	r.SetPathValue("batchId", b)
+	w := httptest.NewRecorder()
+	c := credential{User: h.user, Digest: h.s.Sessions.TokenDigest(h.token)}
+	h.s.persistentBatchRequest(w, r, c, func(w http.ResponseWriter, r *http.Request, c credential) {
+		h.s.tickets(w, r, c)
+		if _, err := h.db.Exec("UPDATE save_batch SET version=version+1 WHERE id=? AND user_id=?", b, h.user); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("unrelated batch revision prevented ticket issuance: %d", w.Code)
+	}
+	var issued int
+	if err := h.db.QueryRow("SELECT direct_issued_total FROM download_domain WHERE host=?", h.host).Scan(&issued); err != nil || issued != 1 {
+		t.Fatalf("ticket issuance was not counted: %d, %v", issued, err)
+	}
+}
+
 func TestDeliveryUnregisteredCopyAndBudgetsMySQL(t *testing.T) {
 	h := newDeliveryHarness(t)
 	h.size = h.s.Settings.Int("relay_max_video_bytes") + 1

@@ -9,6 +9,7 @@ import (
 	"image/png"
 	"io"
 	"os"
+	"time"
 
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
@@ -28,17 +29,31 @@ func (r *Relay) imageWork(ctx context.Context) (func(), error) {
 	r.mu.Unlock()
 	select {
 	case slots <- struct{}{}:
+		if ctx.Err() != nil {
+			<-slots
+			return nil, errors.New("SERVICE_BUSY")
+		}
 		return func() { <-slots }, nil
 	case <-ctx.Done():
 		return nil, errors.New("SERVICE_BUSY")
 	}
 }
 
-func (r *Relay) processImage(ctx context.Context, f *os.File, mime string, thumbnail bool) (string, error) {
+func (r *Relay) processImage(ctx context.Context, f *os.File, mime string, thumbnail bool, imageWait *time.Duration) (string, error) {
 	if mime != "image/jpeg" && mime != "image/png" && mime != "image/webp" {
 		return "", errors.New("FORMAT_UNSUPPORTED")
 	}
-	release, err := r.imageWork(ctx)
+	queued := ctx
+	var stopWaiting context.CancelFunc
+	started := time.Now()
+	if imageWait != nil {
+		queued, stopWaiting = context.WithTimeout(ctx, *imageWait)
+	}
+	release, err := r.imageWork(queued)
+	if stopWaiting != nil {
+		stopWaiting()
+		*imageWait -= time.Since(started)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -96,8 +111,9 @@ func (r *Relay) processImage(ctx context.Context, f *os.File, mime string, thumb
 			}
 		}
 		thumb := image.NewRGBA(image.Rect(0, 0, w, h))
-		draw.Draw(thumb, thumb.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
-		draw.CatmullRom.Scale(thumb, thumb.Bounds(), img, img.Bounds(), draw.Over, nil)
+		if err := scaleThumbnail(ctx, thumb, img); err != nil {
+			return "", err
+		}
 		img = thumb
 	}
 	if err = ctx.Err(); err != nil {
@@ -115,6 +131,21 @@ func (r *Relay) processImage(ctx context.Context, f *os.File, mime string, thumb
 	}
 	err = jpeg.Encode(w, img, &jpeg.Options{Quality: int(quality)})
 	return "image/jpeg", err
+}
+
+func scaleThumbnail(ctx context.Context, dst *image.RGBA, src image.Image) error {
+	bounds := dst.Bounds()
+	white := image.NewUniform(color.White)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		row := image.Rect(bounds.Min.X, y, bounds.Max.X, y+1)
+		draw.Draw(dst, row, white, image.Point{}, draw.Src)
+		// Clip the destination row while preserving the whole-image mapping.
+		draw.ApproxBiLinear.Scale(dst.SubImage(row).(*image.RGBA), bounds, src, src.Bounds(), draw.Over, nil)
+	}
+	return ctx.Err()
 }
 
 type boundedImageWriter struct {

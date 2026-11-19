@@ -11,6 +11,7 @@ import (
 
 	"qushuiyin/service/internal/auth"
 	"qushuiyin/service/internal/media"
+	"qushuiyin/service/internal/parse"
 )
 
 func (s *Mock) livePreviewSignature(p *preview, id, purpose string) string {
@@ -228,13 +229,7 @@ func (s *Mock) livePreviewMedia(w http.ResponseWriter, r *http.Request, purpose 
 		return
 	}
 	identity := res.fileIdentity(aid, version)
-	var prepared media.Prepared
-	var err error
-	if purpose == "thumbnail" { // thumbnails have a separate immutable cache version.
-		prepared, err = s.Relay.PrepareThumbnail(ctx, identity, s.adapterVersion(), *a)
-	} else {
-		prepared, err = s.Relay.Prepare(ctx, identity, s.adapterVersion(), *a)
-	}
+	prepared, err := s.prepareImagePreview(ctx, purpose, identity, *a)
 	if err != nil {
 		fail(w, 503, "SERVICE_BUSY")
 		return
@@ -270,4 +265,22 @@ func (s *Mock) livePreviewMedia(w http.ResponseWriter, r *http.Request, purpose 
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("ETag", "\""+prepared.Hash+"\"")
 	http.ServeContent(counted, r, "image", time.Time{}, file)
+}
+
+func (s *Mock) prepareImagePreview(ctx context.Context, purpose string, identity media.FileIdentity, asset parse.Asset) (media.Prepared, error) {
+	queued := ctx
+	if purpose == "thumbnail" {
+		var cancel context.CancelFunc
+		queued, cancel = context.WithTimeout(ctx, s.Settings.Seconds("thumbnail_generate_timeout_seconds"))
+		defer cancel()
+	}
+	release, err := s.acquireMediaWork(queued)
+	if err != nil {
+		return media.Prepared{}, err
+	}
+	defer release()
+	if purpose == "thumbnail" {
+		return s.Relay.PrepareThumbnail(ctx, queued, identity, s.adapterVersion(), asset)
+	}
+	return s.Relay.Prepare(ctx, identity, s.adapterVersion(), asset)
 }

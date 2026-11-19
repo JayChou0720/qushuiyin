@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -241,4 +242,91 @@ func TestLivePreviewImagesMySQL(t *testing.T) {
 	fresh := previewURL(h, aid)
 	h.db.Exec("UPDATE app_session SET revoked_at=UTC_TIMESTAMP(3) WHERE user_id=?", h.user)
 	previewRequest(h, "GET", fresh, "", 403)
+}
+
+func TestThumbnailQueueTimeoutDoesNotCutOffFetchMySQL(t *testing.T) {
+	h := newDeliveryHarness(t)
+	h.s.Settings.Data["thumbnail_generate_timeout_seconds"] = json.RawMessage(`1`)
+	result := h.req("GET", "/v1/results/"+h.rid, "", nil, 200)
+	aid := result["cover"].(map[string]any)["assetId"].(string)
+	address := previewURL(h, aid)
+	mime, data := fixture.File("image")
+	started := make(chan time.Time, 1)
+	h.s.Relay.Client.Transport = durableMediaTransport(func(r *http.Request) (*http.Response, error) {
+		started <- time.Now()
+		select {
+		case <-time.After(1100 * time.Millisecond):
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {mime}}, ContentLength: int64(len(data)), Body: io.NopCloser(bytes.NewReader(data))}, nil
+	})
+	var releases []func()
+	for range cap(h.s.mediaWork) {
+		release, err := h.s.acquireMediaWork(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases = append(releases, release)
+	}
+	previewRequest(h, "GET", address, "", 503)
+	if len(started) > 0 {
+		t.Fatal("thumbnail bypassed the preparation pool")
+	}
+	for _, release := range releases {
+		release()
+	}
+	previewRequest(h, "GET", address, "", 200)
+	if len(started) != 1 {
+		t.Fatal("thumbnail was not generated after claiming a slot")
+	}
+	files, err := os.ReadDir(h.s.Relay.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if _, err := h.db.Exec("DELETE FROM media_file WHERE storage_key=?", file.Name()); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestMediaCleanupReconcilesCacheBudgetMySQL(t *testing.T) {
+	h := newDeliveryHarness(t)
+	ctx := t.Context()
+	h.s.Relay.CleanOnce(ctx)
+	id := auth.ID()
+	size := h.s.Settings.Int("media_cache_budget_bytes")
+	if _, err := h.db.Exec(`INSERT INTO media_file(id,output_version,storage_key,status,mime_type,size_bytes,sha256,expires_at,last_access_at)
+		VALUES (?,'test',?,'ready','image/png',?,REPEAT('0',64),UTC_TIMESTAMP(3)+INTERVAL 1 HOUR,UTC_TIMESTAMP(3))`, id, id+".media", size); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = h.db.Exec("DELETE FROM media_file WHERE id=?", id) })
+	h.s.Relay.CleanOnce(ctx)
+	result := h.req("GET", "/v1/results/"+h.rid, "", nil, 200)
+	address := previewURL(h, result["cover"].(map[string]any)["assetId"].(string))
+	mime, data := fixture.File("image")
+	fetches := 0
+	h.s.Relay.Client.Transport = durableMediaTransport(func(*http.Request) (*http.Response, error) {
+		fetches++
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {mime}}, ContentLength: int64(len(data)), Body: io.NopCloser(bytes.NewReader(data))}, nil
+	})
+	previewRequest(h, "GET", address, "", 503)
+	if fetches != 0 {
+		t.Fatal("cache admission ignored recalibrated storage")
+	}
+	if _, err := h.db.Exec("DELETE FROM media_file WHERE id=?", id); err != nil {
+		t.Fatal(err)
+	}
+	h.s.Relay.CleanOnce(ctx)
+	previewRequest(h, "GET", address, "", 200)
+	files, err := os.ReadDir(h.s.Relay.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if _, err := h.db.Exec("DELETE FROM media_file WHERE storage_key=?", file.Name()); err != nil {
+			t.Fatal(err)
+		}
+	}
 }

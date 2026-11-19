@@ -72,6 +72,11 @@ func (m *keyedMutex) lockContext(ctx context.Context, key string) (func(), error
 	}
 	select {
 	case entry.token <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-entry.token
+			drop()
+			return nil, err
+		}
 		return func() {
 			<-entry.token
 			drop()
@@ -133,7 +138,10 @@ func (s *Mock) authorizedBatch(next authed) http.HandlerFunc {
 func (s *Mock) persistentBatchRequest(w http.ResponseWriter, r *http.Request, c credential, next authed) {
 	readOnly := r.Method == http.MethodGet || r.Method == http.MethodHead
 	if !readOnly {
-		unlock := s.batchGates.lock(c.User)
+		unlock, err := s.batchGates.lockContext(r.Context(), c.User)
+		if err != nil {
+			return
+		}
 		defer unlock()
 	}
 	state, err := s.loadBatchRequest(r, c.User, readOnly)
@@ -370,15 +378,6 @@ func (s *Mock) saveBatchRequest(ctx context.Context, c credential, state batchRe
 		if err = s.writeBatch(ctx, tx, b, changedItems); err != nil {
 			return err
 		}
-	} else {
-		var version uint64
-		err = tx.QueryRowContext(ctx, "SELECT version FROM save_batch WHERE id=? AND user_id=? FOR UPDATE", b.ID, b.User).Scan(&version)
-		if err != nil {
-			return err
-		}
-		if version != b.Version {
-			return errors.New("batch changed during operation")
-		}
 	}
 	if newKey {
 		for composite, rec := range state.keys {
@@ -481,6 +480,11 @@ func (s *Mock) mediaWorker(ctx context.Context, owner string) {
 	}
 }
 func (s *Mock) preparePersistentItem(ctx context.Context, owner string) (bool, error) {
+	release, err := s.acquireMediaWork(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer release()
 	tx, err := s.Sessions.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -505,8 +509,9 @@ func (s *Mock) preparePersistentItem(ctx context.Context, owner string) (bool, e
 	}
 	deadline := minTime(x.Deadline, b.ExpiresAt)
 	lease := s.Settings.Seconds("media_fetch_timeout_seconds")
+	leaseExpires := minTime(deadline, time.Now().Add(lease)).Truncate(time.Millisecond)
 	seq++
-	_, err = tx.ExecContext(ctx, "UPDATE save_batch_item SET lease_owner=?,lease_expires_at=?,claim_seq=?,prepare_status='PREPARING',version=version+1 WHERE id=?", owner, minTime(deadline, time.Now().Add(lease)), seq, iid)
+	_, err = tx.ExecContext(ctx, "UPDATE save_batch_item SET lease_owner=?,lease_expires_at=?,claim_seq=?,prepare_status='PREPARING',version=version+1 WHERE id=?", owner, leaseExpires, seq, iid)
 	if err != nil {
 		return false, err
 	}
@@ -518,7 +523,19 @@ func (s *Mock) preparePersistentItem(ctx context.Context, owner string) (bool, e
 	}
 	call, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	go s.renewMediaLease(call, cancel, iid, user, owner, seq, deadline, lease)
+	retry := time.Duration(s.Settings.Int("poll_interval_ms")) * time.Millisecond
+	go func() {
+		if !keepMediaLease(call, leaseExpires, deadline, lease, retry, func(ctx context.Context, next time.Time) (int64, error) {
+			result, err := s.Sessions.DB.ExecContext(ctx, `UPDATE save_batch_item SET lease_expires_at=?,version=version+1
+				WHERE id=? AND user_id=? AND claim_seq=? AND lease_owner=? AND prepare_status='PREPARING' AND lease_expires_at>UTC_TIMESTAMP(3)`, next, iid, user, seq, owner)
+			if err != nil {
+				return 0, err
+			}
+			return result.RowsAffected()
+		}) {
+			cancel()
+		}
+	}()
 	res, err := s.loadPersistentResult(call, user, b.ResultID)
 	if err == nil {
 		if s.Relay == nil {
@@ -534,27 +551,56 @@ func (s *Mock) preparePersistentItem(ctx context.Context, owner string) (bool, e
 	return true, s.publishPersistentItem(ctx, owner, seq, b, *x)
 }
 
-func (s *Mock) renewMediaLease(ctx context.Context, cancel context.CancelFunc, id, user, owner string, seq uint64, deadline time.Time, lease time.Duration) {
-	ticker := time.NewTicker(lease / 2)
-	defer ticker.Stop()
+func (s *Mock) acquireMediaWork(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	slots := s.mediaWork
+	select {
+	case slots <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-slots
+			return nil, err
+		}
+		return func() { <-slots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// Keep the last confirmed expiry through transient database errors. A zero-row
+// update proves the claim is lost, regardless of the local expiry.
+func keepMediaLease(ctx context.Context, expires, deadline time.Time, lease, poll time.Duration, renew func(context.Context, time.Time) (int64, error)) bool {
+	retry := min(poll, lease/4)
+	wake := expires.Add(-lease / 2)
 	for {
+		if expires.Equal(deadline.Truncate(time.Millisecond)) {
+			return true // The preparation context already owns the last deadline.
+		}
+		timer := time.NewTimer(time.Until(minTime(wake, expires)))
 		select {
 		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			result, err := s.Sessions.DB.ExecContext(ctx, `UPDATE save_batch_item SET lease_expires_at=?,version=version+1
-				WHERE id=? AND user_id=? AND claim_seq=? AND lease_owner=? AND prepare_status='PREPARING' AND lease_expires_at>UTC_TIMESTAMP(3)`,
-				minTime(deadline, time.Now().Add(lease)), id, user, seq, owner)
-			if err == nil {
-				var changed int64
-				changed, err = result.RowsAffected()
-				if err == nil && changed == 1 {
-					continue
-				}
-			}
-			cancel()
-			return
+			timer.Stop()
+			return true
+		case <-timer.C:
 		}
+		now := time.Now()
+		if !now.Before(expires) {
+			return false
+		}
+		next := minTime(deadline, now.Add(lease)).Truncate(time.Millisecond)
+		// Leave time for another attempt even if this query stalls.
+		attempt, cancel := context.WithTimeout(ctx, min(lease/4, expires.Sub(now)/2))
+		changed, err := renew(attempt, next)
+		cancel()
+		if err != nil {
+			wake = time.Now().Add(retry)
+			continue
+		}
+		if changed == 0 {
+			return false
+		}
+		expires, wake = next, next.Add(-lease/2)
 	}
 }
 

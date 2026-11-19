@@ -64,9 +64,8 @@ func (r *Relay) claimRemoval(key string) bool {
 	return true
 }
 
-func (r *Relay) finishRemoval(key string, bytes int64) {
+func (r *Relay) finishRemoval(key string) {
 	r.mu.Lock()
-	r.used -= bytes
 	delete(r.deleting, key)
 	r.mu.Unlock()
 }
@@ -84,7 +83,7 @@ func (r *Relay) Clean(ctx context.Context) {
 	}
 }
 func (r *Relay) CleanOnce(ctx context.Context) {
-	if err := r.loadUsage(ctx); err != nil {
+	if err := r.calibrateUsage(ctx); err != nil {
 		return
 	}
 	limit := int(r.Settings.Int("cleanup_batch_size"))
@@ -151,8 +150,7 @@ func (r *Relay) cleanExpiredFile(ctx context.Context, f expiredFile) {
 	if !r.claimRemoval(f.key) {
 		return
 	}
-	var removedBytes int64
-	defer func() { r.finishRemoval(f.key, removedBytes) }()
+	defer r.finishRemoval(f.key)
 	changed, err := r.DB.ExecContext(ctx, `UPDATE media_file f SET status='deleting',version=version+1 WHERE f.id=? AND f.expires_at<=UTC_TIMESTAMP(3) AND NOT EXISTS (SELECT 1 FROM media_object o WHERE o.file_id=f.id AND o.status='ready' AND o.expires_at>UTC_TIMESTAMP(3))`, f.id)
 	if err != nil {
 		return
@@ -164,11 +162,17 @@ func (r *Relay) cleanExpiredFile(ctx context.Context, f expiredFile) {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return
 	}
+	finish := r.beginUsageChange()
 	deleted, err := r.DB.ExecContext(ctx, "DELETE FROM media_file WHERE id=? AND status='deleting'", f.id)
-	if err == nil {
-		if n, err := deleted.RowsAffected(); err == nil && n == 1 {
-			removedBytes = f.size
-		}
+	if err != nil {
+		finish(0, false)
+		_ = r.calibrateUsage(context.WithoutCancel(ctx))
+		return
+	}
+	n, err := deleted.RowsAffected()
+	finish(-n*f.size, err == nil)
+	if err != nil {
+		_ = r.calibrateUsage(context.WithoutCancel(ctx))
 	}
 }
 
@@ -180,7 +184,7 @@ func (r *Relay) cleanOrphans(ctx context.Context, keys []string) {
 	var claimed []string
 	for _, key := range keys {
 		if !registered[key] && r.claimRemoval(key) {
-			defer r.finishRemoval(key, 0)
+			defer r.finishRemoval(key)
 			claimed = append(claimed, key)
 		}
 	}
