@@ -37,11 +37,7 @@ func (s *Mock) adminLogin(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, "ACCESS_DENIED")
 		return
 	}
-	s.mu.Lock()
-	allowed := s.minute("admin-login:"+ip.String(), s.settings().Int("ip_admin_login_requests_per_minute"))
-	s.mu.Unlock()
-	if !allowed {
-		fail(w, 429, "RATE_LIMITED")
+	if !s.admitMinute(w, "admin-login:"+ip.String(), s.settings().Int("ip_admin_login_requests_per_minute")) {
 		return
 	}
 	var req struct{ Username, Password string }

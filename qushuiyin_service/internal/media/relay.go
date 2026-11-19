@@ -32,6 +32,7 @@ type Prepared struct {
 }
 
 var ErrSourceExpired = errors.New("media source expired")
+var ErrStorageCapacity = errors.New("STORAGE_CAPACITY_LOW")
 
 type Relay struct {
 	Domains            Domains
@@ -52,6 +53,7 @@ type Relay struct {
 	usageRevision      uint64
 	used, reserved     int64
 	imageSlots         chan struct{}
+	volume             func(string) (uint64, uint64, error)
 }
 
 func (r *Relay) settings() config.Values {
@@ -434,6 +436,10 @@ func (r *Relay) calibrateUsage(ctx context.Context) error {
 }
 
 func (r *Relay) reserve(ctx context.Context, limit int64) (func(), error) {
+	room, err := r.volumeHeadroom()
+	if err != nil || limit > room {
+		return nil, ErrStorageCapacity
+	}
 	for {
 		if err := r.refreshUsage(ctx, false); err != nil {
 			return nil, err
@@ -447,6 +453,9 @@ func (r *Relay) reserve(ctx context.Context, limit int64) (func(), error) {
 	defer r.mu.Unlock()
 	if limit <= 0 || limit > r.settings().Int("media_cache_budget_bytes")-r.used-r.reserved {
 		return nil, errors.New("SERVICE_BUSY")
+	}
+	if limit > room-r.reserved {
+		return nil, ErrStorageCapacity
 	}
 	r.reserved += limit
 	return func() {

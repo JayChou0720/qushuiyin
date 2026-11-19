@@ -393,7 +393,7 @@ func (s *Mock) parseWorker(ctx context.Context, owner string) {
 			close(stopped)
 			if ctx.Err() == nil {
 				if err := s.finishParse(ctx, p, parsed, e); err != nil {
-					slog.Warn("parse publication failed", "error", err)
+					slog.Warn("parse publication failed", "event", "parse_publish_failed")
 				}
 			}
 			cancel()

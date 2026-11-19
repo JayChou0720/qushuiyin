@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/pressly/goose/v3"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"qushuiyin/service/internal/config"
@@ -16,6 +17,7 @@ import (
 	"qushuiyin/service/internal/outbound"
 	"qushuiyin/service/internal/parse"
 	"qushuiyin/service/migrations"
+	"syscall"
 	"time"
 )
 
@@ -45,10 +47,10 @@ func runWithProbeAdapter(ctx context.Context, args []string, getenv func(string)
 		return deletionCommand(ctx, args[1:], getenv, out)
 	}
 	if len(args) == 1 && args[0] == "serve" {
-		return mockCommand(ctx, "serve", getenv, out)
+		return serviceCommand(ctx, "serve", getenv, out)
 	}
 	if len(args) == 2 && args[0] == "dev" && args[1] == "seed" {
-		return mockCommand(ctx, "seed", getenv, out)
+		return serviceCommand(ctx, "seed", getenv, out)
 	}
 	if len(args) != 2 || (args[0] != "probe" && (args[0] != "migrate" || (args[1] != "up" && args[1] != "status"))) {
 		return errors.New("usage: qushuiyin-server serve | dev seed | migrate up | migrate status | admin create | deletions export | deletions replay <manifest.json> | probe <share-url>")
@@ -166,7 +168,8 @@ func runWithProbeAdapter(ctx context.Context, args []string, getenv func(string)
 	return nil
 }
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if err := run(ctx, os.Args[1:], os.Getenv, os.Stdout); err != nil {
 		failure := map[string]any{"error": err.Error()}

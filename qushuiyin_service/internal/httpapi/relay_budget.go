@@ -4,11 +4,29 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
 	"qushuiyin/service/internal/auth"
 )
+
+var errEgressQuota = errors.New("media egress quota exceeded")
+var errTicketQuota = errors.New("ticket byte allowance exhausted")
+
+func rejectMediaBudget(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errEgressQuota):
+		now := time.Now()
+		retry := int64((dayStart(now).AddDate(0, 0, 1).Sub(now) + time.Second - 1) / time.Second)
+		w.Header().Set("Retry-After", strconv.FormatInt(retry, 10))
+		send(w, 429, "MEDIA_BUDGET_EXCEEDED", nil, dto{"retryAfterSeconds": retry})
+	case errors.Is(err, errTicketQuota):
+		fail(w, 429, "RATE_LIMITED")
+	default:
+		fail(w, 503, "SERVICE_BUSY")
+	}
+}
 
 type ticketBudget struct {
 	expires        time.Time
@@ -57,7 +75,7 @@ func (s *Mock) reserveMediaBytes(ctx context.Context, user, key string, expires 
 	}
 	if n <= 0 || n > remaining || !now.Before(expires) {
 		s.mu.Unlock()
-		return 0, nil, errors.New("RATE_LIMITED")
+		return 0, nil, errTicketQuota
 	}
 	b.reserved += n
 	s.mu.Unlock()
@@ -129,7 +147,7 @@ func (s *Mock) reserveEgress(ctx context.Context, user string, size int64, parti
 			size = min(size, remaining)
 		}
 		if size <= 0 || size > remaining {
-			return 0, nil, errors.New("media egress quota exceeded")
+			return 0, nil, errEgressQuota
 		}
 	}
 	for _, subject := range subjects {

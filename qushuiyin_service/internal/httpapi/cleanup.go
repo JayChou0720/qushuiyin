@@ -144,6 +144,7 @@ func (s *Mock) cleanDatabase(ctx context.Context, now time.Time) {
 	db := s.Sessions.DB
 	limit := s.settings().Int("cleanup_batch_size")
 	if s.Persistent {
+		s.finishOverdueParses(ctx, now, limit)
 		// Keep opaque IDs for explicit expiry/idempotency responses, but erase
 		// source signatures and content as soon as their short retention ends.
 		for _, q := range []string{
@@ -184,10 +185,10 @@ func (s *Mock) cleanDatabase(ctx context.Context, now time.Time) {
 	}
 	for _, x := range pending {
 		if !now.Before(x.deadline) {
-			slog.Warn("local data cleanup overdue", "cleanup_id", x.id)
+			slog.Warn("local data cleanup overdue", "event", "user_cleanup_overdue", "cleanup_id", x.id)
 		}
 		if err = s.runCleanup(ctx, x.id); err != nil {
-			slog.Warn("local data cleanup failed; will retry", "cleanup_id", x.id)
+			slog.Warn("local data cleanup failed; will retry", "event", "user_cleanup_failed", "cleanup_id", x.id)
 			if _, recordErr := db.ExecContext(ctx, "UPDATE cleanup_job SET attempt=attempt+1,last_error_code='INTERNAL_ERROR' WHERE id=? AND status='PENDING'", x.id); recordErr != nil {
 				slog.Warn("local data cleanup could not record failure", "cleanup_id", x.id)
 			}
@@ -197,6 +198,11 @@ func (s *Mock) cleanDatabase(ctx context.Context, now time.Time) {
 		query  string
 		cutoff any
 	}{
+		{"DELETE FROM app_session WHERE expires_at<=? ORDER BY expires_at LIMIT ?", now},
+		{"DELETE FROM admin_session WHERE expires_at<=? ORDER BY expires_at LIMIT ?", now},
+		{"DELETE FROM usage_counter WHERE stat_date<? ORDER BY stat_date LIMIT ?", now.In(shanghaiDay).Format("2006-01-02")},
+		{"DELETE FROM cleanup_job WHERE status='SUCCEEDED' AND updated_at<=? LIMIT ?", now.AddDate(0, 0, -int(s.settings().Int("diagnostic_retention_days")))},
+		{"DELETE FROM ops_minute_metric WHERE bucket_at<? ORDER BY bucket_at LIMIT ?", minTime(now.AddDate(0, 0, -int(s.settings().Int("diagnostic_retention_days"))), now.Add(-s.settings().Seconds("direct_alert_window_seconds"))).Truncate(time.Minute)},
 		{"DELETE FROM feedback WHERE expires_at<=? ORDER BY expires_at LIMIT ?", now},
 		{"DELETE FROM event_ingest WHERE received_at<=? ORDER BY received_at LIMIT ?", now.AddDate(0, 0, -int(s.settings().Int("diagnostic_retention_days")))},
 		{"DELETE FROM operation_sample WHERE created_at<=? ORDER BY created_at LIMIT ?", now.AddDate(0, 0, -int(s.settings().Int("diagnostic_retention_days")))},
@@ -205,7 +211,38 @@ func (s *Mock) cleanDatabase(ctx context.Context, now time.Time) {
 		{"DELETE FROM daily_metric WHERE stat_date<? ORDER BY stat_date LIMIT ?", dayStart(now).In(shanghaiDay).AddDate(0, 0, 1-int(s.settings().Int("aggregate_metric_retention_days"))).Format("2006-01-02")},
 	} {
 		if _, err = db.ExecContext(ctx, q.query, q.cutoff, limit); err != nil {
-			slog.Warn("local data retention sweep failed")
+			slog.Warn("local data retention sweep failed", "event", "data_retention_failed")
+		}
+	}
+	if s.Persistent {
+		s.purgeExpiredRows(ctx, now.AddDate(0, 0, -int(s.settings().Int("tombstone_retention_days"))), limit)
+	}
+}
+
+func (s *Mock) finishOverdueParses(ctx context.Context, now time.Time, limit int64) {
+	updated, err := s.Sessions.DB.ExecContext(ctx, `UPDATE parse_job SET status='FAILED',error_code='PARSE_TIMEOUT',
+		finished_at=?,lease_owner=NULL,lease_expires_at=NULL,source_url_enc=NULL,version=version+1
+		WHERE status IN ('QUEUED','RUNNING') AND deadline_at<=? ORDER BY deadline_at LIMIT ?`, now, now, limit)
+	if err != nil {
+		slog.Warn("parse deadline sweep failed", "event", "data_retention_failed")
+		return
+	}
+	if count, err := updated.RowsAffected(); err == nil && count > 0 {
+		slog.Warn("parse tasks exceeded their deadline", "event", "parse_queue_deadline", "count", count)
+	}
+}
+
+func (s *Mock) purgeExpiredRows(ctx context.Context, cutoff time.Time, limit int64) {
+	for _, query := range []string{
+		"DELETE FROM save_batch_item WHERE batch_id IN (SELECT id FROM save_batch WHERE expires_at<?) LIMIT ?",
+		"DELETE FROM save_batch WHERE expires_at<? AND NOT EXISTS (SELECT 1 FROM save_batch_item i WHERE i.batch_id=save_batch.id) LIMIT ?",
+		"DELETE FROM media_object WHERE expires_at<? LIMIT ?",
+		"DELETE FROM media_asset WHERE result_id IN (SELECT id FROM parse_result WHERE expires_at<?) AND NOT EXISTS (SELECT 1 FROM media_object o WHERE o.user_id=media_asset.user_id AND o.asset_id=media_asset.id) LIMIT ?",
+		"DELETE FROM parse_result WHERE expires_at<? AND NOT EXISTS (SELECT 1 FROM media_asset a WHERE a.user_id=parse_result.user_id AND a.result_id=parse_result.id) AND NOT EXISTS (SELECT 1 FROM save_batch b WHERE b.user_id=parse_result.user_id AND b.result_id=parse_result.id) LIMIT ?",
+		"DELETE FROM parse_job WHERE expires_at<? AND status IN ('FAILED','CANCELLED','SUCCEEDED') AND NOT EXISTS (SELECT 1 FROM parse_result p WHERE p.job_id=parse_job.id) LIMIT ?",
+	} {
+		if _, err := s.Sessions.DB.ExecContext(ctx, query, cutoff, limit); err != nil {
+			slog.Warn("expired object sweep failed", "event", "data_retention_failed")
 		}
 	}
 }

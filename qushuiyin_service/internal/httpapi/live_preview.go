@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/hmac"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -188,6 +189,7 @@ func (s *Mock) livePreviewMedia(w http.ResponseWriter, r *http.Request, purpose 
 		limit := s.settings().Int("preview_max_bytes")
 		key := purpose + ":" + id
 		var settle func(int64)
+		var budgetErr error
 		defer func() {
 			if settle != nil {
 				settle(counted.sent)
@@ -200,12 +202,17 @@ func (s *Mock) livePreviewMedia(w http.ResponseWriter, r *http.Request, purpose 
 			}
 			size, done, err := s.reserveMediaBytes(ctx, p.user, key, p.expires, want, limit, true)
 			if err != nil {
+				budgetErr = err
 				return 0
 			}
 			settle = done
 			return size
 		})
 		if err != nil {
+			if budgetErr != nil {
+				rejectMediaBudget(w, budgetErr)
+				return
+			}
 			switch err.Error() {
 			case "BAD_RANGE":
 				rejectMediaRange(w, stream.TotalSize)
@@ -234,7 +241,11 @@ func (s *Mock) livePreviewMedia(w http.ResponseWriter, r *http.Request, purpose 
 	identity := res.fileIdentity(aid, version)
 	prepared, err := s.prepareImagePreview(ctx, purpose, identity, *a)
 	if err != nil {
-		fail(w, 503, "SERVICE_BUSY")
+		code := "SERVICE_BUSY"
+		if errors.Is(err, media.ErrStorageCapacity) {
+			code = "STORAGE_CAPACITY_LOW"
+		}
+		fail(w, 503, code)
 		return
 	}
 	file, done, err := s.Relay.Acquire(prepared.StorageKey)
@@ -259,7 +270,7 @@ func (s *Mock) livePreviewMedia(w http.ResponseWriter, r *http.Request, purpose 
 		}
 		settle, err := s.reservePreviewBytes(ctx, p.user, purpose+":"+id, p.expires, n, prepared.Size*s.settings().Int("ticket_byte_budget_multiplier"))
 		if err != nil {
-			fail(w, 429, "RATE_LIMITED")
+			rejectMediaBudget(w, err)
 			return
 		}
 		defer func() { settle(counted.sent); s.reportTransfer(transfer, counted) }()

@@ -58,6 +58,7 @@ type Mock struct {
 	Platforms        []Platform
 	Origin           string
 	DevLogin         bool
+	WeChat           *auth.WeChat
 	lifecycle        sync.RWMutex
 	mu               sync.Mutex
 	parseContext     context.Context
@@ -95,12 +96,16 @@ const privacyVersion = "2026-09-v1"
 var messages = map[string]string{"OK": "操作成功", "INPUT_EMPTY": "请粘贴作品分享链接", "INPUT_TOO_LONG": "内容过多，请只粘贴一个作品", "TOO_MANY_LINKS": "链接太多，请只粘贴一个作品", "MULTIPLE_LINKS": "检测到多个链接，请选择一个", "NO_LINK_FOUND": "未找到作品分享链接", "LINK_INVALID": "链接无效，请检查后重试", "LINK_NOT_ALLOWED": "链接无效或暂不支持该地址", "PLATFORM_UNSUPPORTED": "暂不支持这个平台", "PLATFORM_MAINTENANCE": "该平台暂时繁忙，请稍后再试", "CONTENT_TYPE_UNSUPPORTED": "暂不支持该内容类型", "UPSTREAM_UNAVAILABLE": "作品无法访问，可能已删除或限制访问", "UPSTREAM_INVALID_RESPONSE": "没有取得可用的媒体资源", "TOO_MANY_ASSETS": "作品资源过多", "PARSE_TIMEOUT": "解析超时，请重试", "AUTH_REQUIRED": "请先登录", "SESSION_EXPIRED": "使用状态已过期，请重试", "RESOURCE_NOT_FOUND": "资源不存在", "RESULT_EXPIRED": "解析结果已过期，请重新解析", "JOB_EXPIRED": "解析任务已过期", "BATCH_EXPIRED": "保存操作已过期", "BAD_REQUEST": "请求参数有误", "PRIVACY_VERSION_REQUIRED": "请先查看最新隐私说明", "IDEMPOTENCY_CONFLICT": "该操作已使用不同参数提交", "FILE_NOT_READY": "文件尚未准备好", "FALLBACK_NOT_ALLOWED": "当前下载方式不支持回退", "RATE_LIMITED": "操作较频繁，请稍后再试", "SERVICE_BUSY": "服务繁忙，请稍后再试", "INTERNAL_ERROR": "服务暂不可用"}
 
 func issue(code string) dto {
-	return dto{"code": code, "message": messageFor(code), "retryable": code == "UPSTREAM_UNAVAILABLE" || code == "PARSE_TIMEOUT" || code == "PREPARE_TIMEOUT" || code == "MEDIA_SOURCE_EXPIRED" || code == "SERVICE_BUSY"}
+	return dto{"code": code, "message": messageFor(code), "retryable": code == "UPSTREAM_UNAVAILABLE" || code == "PARSE_TIMEOUT" || code == "PREPARE_TIMEOUT" || code == "MEDIA_SOURCE_EXPIRED" || code == "SERVICE_BUSY" || code == "STORAGE_CAPACITY_LOW"}
 }
 func messageFor(code string) string {
 	switch code {
 	case "CONTENT_CHANGED":
 		return "作品内容已变化，请重新解析"
+	case "MEDIA_BUDGET_EXCEEDED":
+		return "当前下载流量已达保护上限，请稍后重试"
+	case "STORAGE_CAPACITY_LOW":
+		return "文件服务暂时繁忙，请稍后重试"
 	case "FILE_TOO_LARGE":
 		return "文件超过当前可保存大小"
 	case "FORMAT_UNSUPPORTED":
@@ -224,7 +229,11 @@ func (s *Mock) login(w http.ResponseWriter, r *http.Request) {
 	name, prefix := strings.CutPrefix(req.Code, "dev:")
 	name = strings.TrimSpace(name)
 	ip := s.clientIP(r)
-	if !s.DevLogin || !peerIP(r).IsLoopback() || !ip.IsLoopback() || !prefix || name == "" || utf8.RuneCountInString(name) > 64 {
+	validCode := req.Code != "" && len(req.Code) <= 256 && !strings.ContainsAny(req.Code, " \t\r\n") && !prefix
+	if s.WeChat == nil {
+		validCode = s.DevLogin && peerIP(r).IsLoopback() && ip.IsLoopback() && prefix && name != "" && utf8.RuneCountInString(name) <= 64
+	}
+	if !ip.IsValid() || !validCode {
 		fail(w, 400, "BAD_REQUEST")
 		return
 	}
@@ -232,18 +241,31 @@ func (s *Mock) login(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, "PRIVACY_VERSION_REQUIRED")
 		return
 	}
-	s.mu.Lock()
-	allowed := s.minute("login:"+ip.String(), s.settings().Int("ip_login_requests_per_minute"))
-	s.mu.Unlock()
-	if !allowed {
-		fail(w, 429, "RATE_LIMITED")
+	if !s.admitMinute(w, "login:"+ip.String(), s.settings().Int("ip_login_requests_per_minute")) {
+		return
+	}
+	if s.WeChat != nil && !s.admitMinute(w, "app-login", s.settings().Int("app_login_requests_per_minute")) {
 		return
 	}
 	store := s.Sessions
 	if s.ManagedConfig {
 		store.TTL = s.settings().Seconds("session_ttl_seconds")
 	}
-	sess, err := store.DevLogin(r.Context(), name)
+	var sess auth.Session
+	var err error
+	if s.WeChat == nil {
+		sess, err = store.DevLogin(r.Context(), name)
+	} else {
+		var openID string
+		openID, err = s.WeChat.OpenID(r.Context(), req.Code)
+		if errors.Is(err, auth.ErrWeChatCode) {
+			fail(w, 401, "SESSION_EXPIRED")
+			return
+		}
+		if err == nil {
+			sess, err = store.WeChatLogin(r.Context(), s.WeChat.AppID, openID)
+		}
+	}
 	if err != nil {
 		fail(w, 503, "SERVICE_BUSY")
 		return
@@ -252,6 +274,9 @@ func (s *Mock) login(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Mock) publicConfig(w http.ResponseWriter, r *http.Request) {
 	settings := s.settings()
+	if limit := settings.Int("ip_public_config_requests_per_minute"); limit > 0 && !s.admitMinute(w, "public-config:"+s.clientIP(r).String(), limit) {
+		return
+	}
 	keys := []string{"max_share_text_chars", "max_candidate_urls", "max_image_batch_count", "max_title_chars", "max_description_chars", "config_client_cache_seconds", "client_album_concurrency", "client_parse_wait_seconds", "poll_interval_ms", "client_download_timeout_seconds", "max_video_bytes", "max_image_bytes", "feedback_min_chars", "feedback_max_chars", "feedback_contact_max_chars", "pagination_default", "pagination_max", "event_batch_max", "client_queue_max", "client_event_retention_hours", "client_event_retry_initial_seconds", "client_event_retry_max_seconds", "history_max_count", "history_ttl_days", "thumbnail_local_budget_bytes"}
 	limits := map[string]json.RawMessage{}
 	for _, k := range keys {
@@ -312,6 +337,7 @@ func (s *Mock) Handler(ctx context.Context) http.Handler {
 	if s.Admin.DB != nil && s.AdminHost != "" {
 		s.adminRoutes(m)
 	}
+	m.HandleFunc("GET /healthz", s.health)
 	m.HandleFunc("GET /v1/config", s.publicConfig)
 	m.HandleFunc("POST /v1/sessions/wechat", s.login)
 	m.HandleFunc("DELETE /v1/sessions/current", s.authorized(func(w http.ResponseWriter, r *http.Request, c credential) {
@@ -322,12 +348,12 @@ func (s *Mock) Handler(ctx context.Context) http.Handler {
 		ok(w, 200, dto{})
 	}))
 	m.HandleFunc("POST /v1/parse-jobs", s.authorized(s.createJob))
-	m.HandleFunc("GET /v1/parse-jobs/{jobId}", s.authorized(s.jobStatus))
+	m.HandleFunc("GET /v1/parse-jobs/{jobId}", s.authorized(s.poll(s.jobStatus)))
 	m.HandleFunc("DELETE /v1/parse-jobs/{jobId}", s.authorized(s.jobStatus))
 	m.HandleFunc("GET /v1/results/{resultId}", s.authorized(s.resultData))
 	m.HandleFunc("POST /v1/results/{resultId}/preview-tickets", s.authorized(s.previewTickets))
 	m.HandleFunc("POST /v1/save-batches", s.authorizedBatch(s.createBatch))
-	m.HandleFunc("GET /v1/save-batches/{batchId}", s.authorizedBatch(s.batchStatus))
+	m.HandleFunc("GET /v1/save-batches/{batchId}", s.authorizedBatch(s.poll(s.batchStatus)))
 	m.HandleFunc("DELETE /v1/save-batches/{batchId}", s.authorizedBatch(s.batchStatus))
 	m.HandleFunc("POST /v1/save-batches/{batchId}/tickets", s.authorizedBatch(s.tickets))
 	m.HandleFunc("POST /v1/save-batches/{batchId}/retry", s.authorizedBatch(s.retryBatch))
@@ -423,7 +449,9 @@ func parseError(err error) string {
 	return "UPSTREAM_UNAVAILABLE"
 }
 func (s *Mock) Clean(ctx context.Context) {
-	s.cleanDatabase(ctx, time.Now().UTC())
+	now := time.Now().UTC()
+	s.cleanDatabase(ctx, now)
+	s.reportOperationAlerts(ctx, now)
 	ticker := time.NewTicker(s.settings().Seconds("media_gc_interval_seconds"))
 	defer ticker.Stop()
 	for {
@@ -435,6 +463,7 @@ func (s *Mock) Clean(ctx context.Context) {
 			s.prune(now)
 			s.mu.Unlock()
 			s.cleanDatabase(ctx, now.UTC())
+			s.reportOperationAlerts(ctx, now.UTC())
 		}
 	}
 }

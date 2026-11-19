@@ -33,6 +33,13 @@ func (s Domains) Observe(ctx context.Context, p, h string) (string, error) {
 	if e = tx.QueryRowContext(ctx, "SELECT status FROM download_domain WHERE host=?", h).Scan(&state); e != nil {
 		return "", errors.New("domain lookup failed")
 	}
+	kind := "unregistered"
+	if state == "registered" {
+		kind = "registered"
+	}
+	if e = CountOperation(ctx, tx, p, kind, 1); e != nil {
+		return "", errors.New("domain observation count failed")
+	}
 	if e = tx.Commit(); e != nil {
 		return "", errors.New("domain commit failed")
 	}

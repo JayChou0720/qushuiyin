@@ -33,18 +33,25 @@ type Session struct {
 
 // DevLogin is only called after the local-only HTTP gate has been checked.
 func (s Store) DevLogin(ctx context.Context, name string) (Session, error) {
+	return s.login(ctx, "local", Digest(s.Key, "mock user:"+name))
+}
+
+func (s Store) WeChatLogin(ctx context.Context, appID, openID string) (Session, error) {
+	return s.login(ctx, appID, Digest(s.Key, "wechat user:"+appID+":"+openID))
+}
+
+func (s Store) login(ctx context.Context, appID, subject string) (Session, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return Session{}, err
 	}
 	defer tx.Rollback()
-	subject := Digest(s.Key, "mock user:"+name)
-	_, err = tx.ExecContext(ctx, "INSERT INTO app_user(id,app_id,subject_hash,status) VALUES (?,'local',?,'active') ON DUPLICATE KEY UPDATE app_id=app_id", ID(), subject)
+	_, err = tx.ExecContext(ctx, "INSERT INTO app_user(id,app_id,subject_hash,status) VALUES (?,?,?,'active') ON DUPLICATE KEY UPDATE app_id=app_id", ID(), appID, subject)
 	if err != nil {
 		return Session{}, err
 	}
 	var sess Session
-	err = tx.QueryRowContext(ctx, "SELECT id FROM app_user WHERE app_id='local' AND subject_hash=? AND status='active'", subject).Scan(&sess.UserID)
+	err = tx.QueryRowContext(ctx, "SELECT id FROM app_user WHERE app_id=? AND subject_hash=? AND status='active'", appID, subject).Scan(&sess.UserID)
 	if err != nil {
 		return Session{}, err
 	}

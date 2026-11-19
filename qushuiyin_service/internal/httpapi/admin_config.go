@@ -89,7 +89,7 @@ func configUnit(key string) string {
 }
 func configAtStartup(key string) bool {
 	return oneOf(key, "parser_workers", "media_workers", "image_convert_workers", "admin_password_workers", "parse_cache_ttl_seconds", "memory_parse_cache_max_entries",
-		"max_redirects", "media_gc_interval_seconds", "http_read_timeout_seconds", "http_write_timeout_seconds", "http_idle_timeout_seconds",
+		"database_max_open_connections", "wechat_login_timeout_seconds", "max_redirects", "media_gc_interval_seconds", "http_read_timeout_seconds", "http_write_timeout_seconds", "http_idle_timeout_seconds",
 		"upstream_requests_per_minute", "upstream_challenge_window_seconds", "upstream_challenge_threshold", "upstream_challenge_cooldown_seconds", "parser_call_timeout_seconds")
 }
 
@@ -98,10 +98,8 @@ FROM system_config c JOIN system_config d ON d.config_key=c.config_key AND d.ver
 WHERE NOT EXISTS (SELECT 1 FROM system_config n WHERE n.config_key=c.config_key AND n.version>c.version)`
 
 func reservedConfig(key string) bool {
-	return oneOf(key, "parser_transient_retries", "usage_flush_seconds", "disk_high_watermark_percent", "memory_session_cache_max_entries",
-		"save_batch_activity_lease_seconds", "user_parse_per_day", "direct_unregistered_alert_percent", "direct_fallback_alert_percent",
-		"direct_alert_window_seconds", "direct_alert_min_samples", "circuit_library_error_percent", "circuit_window_seconds",
-		"circuit_min_samples", "circuit_failure_percent", "circuit_open_seconds", "tombstone_retention_days", "backup_retention_days",
+	return oneOf(key, "parser_transient_retries", "usage_flush_seconds", "memory_session_cache_max_entries",
+		"save_batch_activity_lease_seconds", "user_parse_per_day", "backup_retention_days",
 		"client_album_concurrency")
 }
 

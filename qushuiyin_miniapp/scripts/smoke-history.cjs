@@ -41,6 +41,8 @@ global.wx = {
 
 async function run() {
   const api = client('services/api.js'), history = client('services/history.js')
+  client('pages/home/index.js')
+  assert.deepEqual(page.onShareAppMessage(), { title: '去水印', path: '/pages/home/index' })
   const owner = await api.confirmUserIdentity()
   const limits = (await api.loadConfig()).limits
   const source = 'https://www.xiaohongshu.com/explore/10002?signature=x%2By&token=a%3Db'

@@ -13,6 +13,44 @@ import (
 	"qushuiyin/service/internal/outbound"
 )
 
+func TestCircuitSeparatesFailureCategories(t *testing.T) {
+	now := time.Now()
+	g := newUpstreamGuard(config.Defaults().Upstream)
+	g.now = func() time.Time { return now }
+	policy := config.Circuit{Window: 5 * time.Minute, Open: time.Minute, MinSamples: 4, FailurePercent: 50, LibraryPercent: 80}
+	record := func(platform string, err error) {
+		t.Helper()
+		permit, acquireErr := g.begin(platform)
+		if acquireErr != nil {
+			t.Fatal(acquireErr)
+		}
+		permit.used = true
+		permit.finish(err, policy)
+	}
+	record("douyin", nil)
+	record("douyin", Timeout)
+	record("douyin", Unavailable)
+	record("douyin", nil)
+	if state := (Adapter{guard: g}).CircuitState("douyin"); state != "closed" {
+		t.Fatal("different error categories must not share a numerator")
+	}
+	record("douyin", InvalidResponse)
+	record("douyin", Timeout)
+	if _, err := g.begin("douyin"); !errors.Is(err, Maintenance) {
+		t.Fatal("expected the configured source error circuit to open")
+	}
+	record("kuaishou", nil)
+	now = now.Add(time.Minute)
+	a := Adapter{guard: g, Policy: map[string]Capability{"douyin": {Status: "maintenance"}}}
+	if _, err := a.Parse(t.Context(), "https://www.douyin.com/video/10001"); !errors.Is(err, Maintenance) {
+		t.Fatal("manual maintenance must reject an automatic probe")
+	}
+	record("douyin", nil)
+	if state := a.CircuitState("douyin"); state != "closed" {
+		t.Fatal("a healthy probe did not recover the circuit")
+	}
+}
+
 func TestPlatformLimitCountsRedirectAndLibraryTogether(t *testing.T) {
 	limits := config.Defaults()
 	limits.Upstream.RequestsPerMinute = 2
@@ -93,7 +131,7 @@ func TestCooldownAllowsOneProbe(t *testing.T) {
 	now := time.Now()
 	g.now = func() time.Time { return now }
 	first, _ := g.begin("douyin")
-	first.finish(false, true)
+	first.finish(ErrUpstreamChallenge, config.Circuit{})
 	now = now.Add(p.ChallengeCooldown)
 	probe, err := g.begin("douyin")
 	if err != nil {
@@ -102,7 +140,7 @@ func TestCooldownAllowsOneProbe(t *testing.T) {
 	if _, err = g.begin("douyin"); !errors.Is(err, Maintenance) {
 		t.Fatalf("second probe admitted: %v", err)
 	}
-	probe.finish(false, false)
+	probe.finish(Canceled, config.Circuit{})
 	if _, err = g.begin("douyin"); err != nil {
 		t.Fatalf("unused probe should release the slot: %v", err)
 	}

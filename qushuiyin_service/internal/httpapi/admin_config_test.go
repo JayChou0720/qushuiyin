@@ -20,8 +20,9 @@ func TestConfigRolePermissions(t *testing.T) {
 		{"admin_session_ttl_seconds", true, false, false},
 		{"max_image_pixels", true, false, false},
 		{"client_event_retention_hours", true, false, false},
-		{"tombstone_retention_days", false, false, false},
+		{"tombstone_retention_days", true, false, false},
 		{"parser_transient_retries", false, false, false},
+		{"backup_retention_days", false, false, false},
 	} {
 		for role, want := range map[string]bool{"super_admin": tc.super, "tech_admin": tc.tech, "operator": tc.operator, "viewer": false, "support": false, "auditor": false} {
 			if got := editableConfig(role, tc.key); got != want {

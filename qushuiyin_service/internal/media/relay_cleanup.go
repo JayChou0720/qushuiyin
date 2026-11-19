@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -82,15 +84,44 @@ func (r *Relay) Clean(ctx context.Context) {
 		}
 	}
 }
+func (r *Relay) volumeHeadroom() (int64, error) {
+	settings := r.settings()
+	if _, ok := settings.Data["disk_high_watermark_percent"]; !ok {
+		return math.MaxInt64, nil
+	}
+	percent := settings.Int("disk_high_watermark_percent")
+	getSpace := r.volume
+	if getSpace == nil {
+		getSpace = volumeSpace
+	}
+	free, total, err := getSpace(r.Directory)
+	if err != nil || total == 0 {
+		return 0, ErrStorageCapacity
+	}
+	headroom := float64(free) - float64(total)*float64(100-percent)/100
+	return int64(min(float64(math.MaxInt64-1024), max(0, headroom))), nil
+}
+
 func (r *Relay) CleanOnce(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, r.settings().Seconds("database_operation_timeout_seconds"))
+	defer cancel()
+	room, diskErr := r.volumeHeadroom()
+	if diskErr != nil {
+		slog.Warn("media volume inspection failed", "event", "media_storage_unavailable")
+	}
+	pressure := diskErr == nil && room == 0
+	if pressure {
+		slog.Warn("media volume above high watermark", "event", "media_disk_high_watermark")
+	}
 	if err := r.calibrateUsage(ctx); err != nil {
+		slog.Warn("media cache calibration failed", "event", "media_cleanup_failed")
 		return
 	}
 	limit := int(r.settings().Int("cleanup_batch_size"))
 	if limit <= 0 {
 		return
 	}
-	rows, err := r.DB.QueryContext(ctx, `SELECT f.id,f.storage_key,f.size_bytes FROM media_file f WHERE f.expires_at<=UTC_TIMESTAMP(3) AND NOT EXISTS (SELECT 1 FROM media_object o WHERE o.file_id=f.id AND o.status='ready' AND o.expires_at>UTC_TIMESTAMP(3)) LIMIT ?`, limit)
+	rows, err := r.DB.QueryContext(ctx, `SELECT f.id,f.storage_key,f.size_bytes FROM media_file f WHERE (f.expires_at<=UTC_TIMESTAMP(3) OR f.status='deleting' OR ?) AND NOT EXISTS (SELECT 1 FROM media_object o WHERE o.file_id=f.id AND o.status='ready' AND o.expires_at>UTC_TIMESTAMP(3)) ORDER BY f.expires_at,f.id LIMIT ?`, pressure, limit)
 	if err != nil {
 		return
 	}
@@ -109,14 +140,29 @@ func (r *Relay) CleanOnce(ctx context.Context) {
 		return
 	}
 	for _, f := range pending {
-		r.cleanExpiredFile(ctx, f)
+		r.cleanExpiredFile(ctx, f, pressure)
 	}
 
-	files, err := os.ReadDir(r.Directory)
+	dir, err := os.Open(r.Directory)
 	if err != nil {
 		return
 	}
+	defer dir.Close()
 	before := time.Now().Add(-r.settings().Seconds("media_fetch_timeout_seconds") - r.settings().Seconds("lease_cleanup_grace_seconds"))
+	for ctx.Err() == nil {
+		files, err := dir.ReadDir(limit)
+		if err != nil && !errors.Is(err, io.EOF) {
+			slog.Warn("media directory scan failed", "event", "media_cleanup_failed")
+			return
+		}
+		r.cleanDiskEntries(ctx, files, before)
+		if errors.Is(err, io.EOF) {
+			return
+		}
+	}
+}
+
+func (r *Relay) cleanDiskEntries(ctx context.Context, files []os.DirEntry, before time.Time) {
 	var candidates []string
 	for _, f := range files {
 		if !f.Type().IsRegular() {
@@ -136,8 +182,8 @@ func (r *Relay) CleanOnce(ctx context.Context) {
 			candidates = append(candidates, key)
 		}
 	}
-	for group := range slices.Chunk(candidates, limit) {
-		r.cleanOrphans(ctx, group)
+	if len(candidates) > 0 {
+		r.cleanOrphans(ctx, candidates)
 	}
 }
 
@@ -146,12 +192,12 @@ type expiredFile struct {
 	size    int64
 }
 
-func (r *Relay) cleanExpiredFile(ctx context.Context, f expiredFile) {
+func (r *Relay) cleanExpiredFile(ctx context.Context, f expiredFile, pressure bool) {
 	if !r.claimRemoval(f.key) {
 		return
 	}
 	defer r.finishRemoval(f.key)
-	changed, err := r.DB.ExecContext(ctx, `UPDATE media_file f SET status='deleting',version=version+1 WHERE f.id=? AND f.expires_at<=UTC_TIMESTAMP(3) AND NOT EXISTS (SELECT 1 FROM media_object o WHERE o.file_id=f.id AND o.status='ready' AND o.expires_at>UTC_TIMESTAMP(3))`, f.id)
+	changed, err := r.DB.ExecContext(ctx, `UPDATE media_file f SET status='deleting',version=version+1 WHERE f.id=? AND (f.expires_at<=UTC_TIMESTAMP(3) OR f.status='deleting' OR ?) AND NOT EXISTS (SELECT 1 FROM media_object o WHERE o.file_id=f.id AND o.status='ready' AND o.expires_at>UTC_TIMESTAMP(3))`, f.id, pressure)
 	if err != nil {
 		return
 	}
@@ -160,6 +206,7 @@ func (r *Relay) cleanExpiredFile(ctx context.Context, f expiredFile) {
 	}
 	err = os.Remove(filepath.Join(r.Directory, f.key))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		slog.Warn("media cache file removal failed", "event", "media_cleanup_failed")
 		return
 	}
 	finish := r.beginUsageChange()
@@ -198,6 +245,7 @@ func (r *Relay) cleanOrphans(ctx context.Context, keys []string) {
 	}
 	for _, key := range claimed {
 		if !registered[key] {
+			slog.Warn("orphaned media file detected", "event", "media_orphan_removed")
 			_ = os.Remove(filepath.Join(r.Directory, key))
 		}
 	}

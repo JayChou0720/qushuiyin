@@ -16,7 +16,18 @@ func (v Values) Upstream() (Upstream, error) {
 	return Upstream{int(v.Int("upstream_requests_per_minute")), int(v.Int("upstream_challenge_threshold")), v.Seconds("upstream_challenge_window_seconds"), v.Seconds("upstream_challenge_cooldown_seconds")}, nil
 }
 
+type Circuit struct {
+	Window, Open                               time.Duration
+	MinSamples, FailurePercent, LibraryPercent int64
+}
+
+func (v Values) Circuit() Circuit {
+	return Circuit{v.Seconds("circuit_window_seconds"), v.Seconds("circuit_open_seconds"),
+		v.Int("circuit_min_samples"), v.Int("circuit_failure_percent"), v.Int("circuit_library_error_percent")}
+}
+
 type Limits struct {
+	Circuit                                                     Circuit
 	Upstream                                                    Upstream
 	Redirects, Assets, Title, Description, MediaCandidates      int
 	RangeBytes, VideoBytes, ImageBytes                          int64
@@ -36,6 +47,7 @@ func Defaults() Limits {
 // Limits maps the runtime settings shared by parsing and media probing.
 func (v Values) Limits() Limits {
 	return Limits{
+		Circuit:   v.Circuit(),
 		Redirects: int(v.Int("max_redirects")), Assets: int(v.Int("max_result_assets")),
 		Title: int(v.Int("max_title_chars")), Description: int(v.Int("max_description_chars")),
 		MediaCandidates: int(v.Int("max_media_candidates")), RangeBytes: v.Int("direct_probe_range_bytes"),

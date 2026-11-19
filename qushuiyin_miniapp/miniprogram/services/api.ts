@@ -1,5 +1,6 @@
-const LOCAL_ORIGIN = 'http://127.0.0.1:18080'
+import { LOCAL_API_ORIGIN, RELEASE_API_ORIGIN } from '../config/env'
 const mockIdentityKey = 'mock-dev-user'
+const usedWeChatKey = 'qsy.wechat-session-used'
 export const clientVersion = 'm1'
 
 export interface EventLimits { event_batch_max: number; client_queue_max: number; client_event_retention_hours: number; client_event_retry_initial_seconds: number; client_event_retry_max_seconds: number }
@@ -49,8 +50,9 @@ let deletionTarget: Session | undefined
 export const id = () => Date.now().toString(36) + '-' + Math.random().toString(36).slice(2)
 export const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 function origin() {
-  if (wx.getAccountInfoSync().miniProgram.envVersion !== 'develop') throw new Error('本版本尚未开放')
-  return LOCAL_ORIGIN
+  if (wx.getAccountInfoSync().miniProgram.envVersion === 'develop') return LOCAL_API_ORIGIN
+  if (!/^https:\/\/[a-zA-Z0-9.-]+(?::443)?$/.test(RELEASE_API_ORIGIN)) throw new Error('本版本尚未配置服务地址')
+  return RELEASE_API_ORIGIN
 }
 function call<T>(method: Method, path: string, data?: object, key?: string, credential?: Session): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -61,9 +63,9 @@ function call<T>(method: Method, path: string, data?: object, key?: string, cred
       success(res) {
         const e = res.data
         if (e?.code === 'OK') resolve(e.data)
-        else reject(new APIError(e?.code || 'SERVICE_BUSY', e?.message || '本地服务暂不可用', e?.error?.details?.candidates))
+        else reject(new APIError(e?.code || 'SERVICE_BUSY', e?.message || '服务暂不可用', e?.error?.details?.candidates))
       },
-      fail() { reject(new ConnectionError('无法连接本地服务，请检查服务是否启动')) },
+      fail() { reject(new ConnectionError('无法连接服务，请检查网络后重试')) },
     })
   })
 }
@@ -86,15 +88,28 @@ async function login(allowNew = true): Promise<Session> {
     const epoch = identityEpoch
     loggingIn = (async () => {
       const config = cached || await loadConfig()
-      if (!config.features.devLogin) throw new Error('本地开发登录未开启')
-      let name = wx.getStorageSync(mockIdentityKey) as string
-      if (!name) {
-        if (!allowNew) throw new Error('此设备还没有使用过服务，无需清除')
-        name = 'device-' + id()
-        wx.setStorageSync(mockIdentityKey, name)
+      const development = config.features.devLogin
+      let code: string
+      if (development) {
+        let name = wx.getStorageSync(mockIdentityKey) as string
+        if (!name) {
+          if (!allowNew) throw new Error('此设备还没有使用过服务，无需清除')
+          name = 'device-' + id()
+          wx.setStorageSync(mockIdentityKey, name)
+        }
+        code = 'dev:' + name
+      } else {
+        if (!allowNew && !hasHistoryIdentity()) throw new Error('此设备还没有使用过服务，无需清除')
+        code = await new Promise<string>((resolve, reject) => wx.login({
+          success: result => result.code ? resolve(result.code) : reject(new Error('未能取得微信登录凭证，请重试')),
+          fail: () => reject(new Error('微信登录暂不可用，请稍后重试')),
+        }))
       }
-      const next = await call<Session>('POST', '/v1/sessions/wechat', { code: 'dev:' + name, clientVersion, privacyVersion: config.privacyVersion })
+      const next = await call<Session>('POST', '/v1/sessions/wechat', { code, clientVersion, privacyVersion: config.privacyVersion })
       if (epoch !== identityEpoch) throw new Error('使用身份已变更，请重新操作')
+      if (!development) {
+        try { wx.setStorageSync(usedWeChatKey, true) } catch { /* Keep the authenticated session usable in this run. */ }
+      }
       session = next
       return next
     })().finally(() => { loggingIn = undefined })
@@ -129,7 +144,7 @@ export const isCurrentUser = (userId: string) => !deleting && session?.userId ==
 export const isKnownUser = (userId: string) => !deleting && session?.userId === userId
 export function hasHistoryIdentity() {
   if (session) return true
-  try { return !!wx.getStorageSync(mockIdentityKey) } catch { return false }
+  try { return !!wx.getStorageSync(mockIdentityKey) || wx.getStorageSync(usedWeChatKey) === true } catch { return false }
 }
 export async function confirmUserIdentity(allowNew = true) {
   const epoch = identityEpoch
@@ -158,7 +173,9 @@ export async function revokeMyData() {
     session = undefined
     deletionTarget = undefined
     let localIdentityCleared = true
-    try { wx.removeStorageSync(mockIdentityKey) } catch { localIdentityCleared = false }
+    for (const key of [mockIdentityKey, usedWeChatKey]) {
+      try { wx.removeStorageSync(key) } catch { localIdentityCleared = false }
+    }
     return { receipt, localIdentityCleared, userId: credential.userId }
   } catch (error) {
     if (deletionTarget && error instanceof ConnectionError) throw new Error('未收到清除结果，可联网后重试')

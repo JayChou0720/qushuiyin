@@ -9,6 +9,7 @@ require (
 	golang.org/x/crypto v0.58.0
 	golang.org/x/image v0.48.0
 	golang.org/x/net v0.62.0
+	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.47.0
 )
 
@@ -24,6 +25,5 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/sync v0.25.0 // indirect
-	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.44.0 // indirect
 )

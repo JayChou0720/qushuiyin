@@ -10,7 +10,7 @@ npm --prefix web/admin run build
 go build -o bin/qushuiyin-server.exe ./cmd/qushuiyin-server
 ```
 
-Vite 输出到 `internal/admin/dist`，Go 构建时将页面和静态资源嵌入可执行文件。本地启动服务后访问 `http://127.0.0.1:18080/admin/`。发布制品使用嵌入构建，仓库只提交占位首页和前端源码。部署反向代理时保留管理端 Host、用 HTTPS 提供页面，并按入口配置 `ADMIN_PUBLIC_HOST` 和 `ADMIN_ALLOWED_ORIGINS`。当前仓库的服务入口限回环开发、测试环境。
+Vite 输出到 `internal/admin/dist`，Go 构建时将页面和静态资源嵌入可执行文件。本地启动服务后访问 `http://127.0.0.1:18080/admin/`。发布制品使用嵌入构建，仓库只提交占位首页和前端源码。部署反向代理时保留管理端 Host、用 HTTPS 提供页面，并按入口配置 `ADMIN_PUBLIC_HOST` 和 `ADMIN_ALLOWED_ORIGINS`。生产入口仍绑定回环，由 HTTPS 反向代理对外提供服务。见 [M5 部署与回滚](../deploy/README.md)。
 
 开发联调可设 `ADMIN_ALLOWED_ORIGINS=http://127.0.0.1:5173` 后启动本地 API，在 `web/admin` 目录运行 `npm run dev -- --host 127.0.0.1`。Vite 代理 `/admin/v1`，默认目标为 `http://127.0.0.1:8080`，本项目的默认 Mock 端口需设置 `ADMIN_API_TARGET=http://127.0.0.1:18080`。
 
@@ -19,6 +19,10 @@ Vite 输出到 `internal/admin/dist`，Go 构建时将页面和静态资源嵌�
 系统配置支持同批发布相互依赖的值。历史值可加入草稿并发布为新版本。页面标明生效方式，包括进程启动时分配的 worker、解析缓存、HTTP 和上游传输参数，以及当前版本未接入的预留配置。超时或并发参数变更期间，已经领取的媒体工作继续使用领取时的字节上限。直连预览由 `direct_preview_enabled` 控制。应用首页和帮助页读取公开公告、帮助和维护文案，刷新间隔按客户端配置缓存时限执行。最近记录与保存恢复入口通过 `GET /v1/me` 确认可用的本人会话后再显示。
 
 备份恢复前的删除重放见 [删除标记恢复流程](doc/restore-deletions.md)。
+
+## M5：发布准备
+
+在隔离开发库运行 `node scripts/load-mock.mjs 18080 20` 测混合负载。启动、监控、回滚和负责人验收见 [部署模板](../deploy/README.md) 与 [发布检查表](../deploy/release-checklist.md)。
 
 ## M1：小程序 Mock 联调
 
@@ -71,7 +75,7 @@ node ./scripts/smoke-events.cjs $historyBuild 18080
 
 `serve` 的任务、结果、候选源、批次和幂等记录使用 MySQL，重启后由过期租约恢复。启动前执行 `migrate up`，保留同一套 `DATA_ENCRYPTION_KEYS`、`HMAC_KEY` 和 `TICKET_SIGNING_KEY`。`start-mock.ps1` 会在项目外的本机运行目录保存开发密钥，勿删除后用新密钥连接旧数据库。
 
-本地真实解析与中转使用 `APP_ENV=local`、`PARSE_MODE=live`、`WECHAT_DEV_LOGIN=true`，设置回环 `HTTP_ADDR`，清除 `MOCK_MEDIA_ORIGIN`。此外设置绝对路径 `MEDIA_DIR` 与 `FFPROBE_PATH`，例如 `D:\FFmpeg\bin\ffprobe.exe`，再运行 `qushuiyin-server serve`。只有开发、测试环境可运行这一入口。真实微信登录与生产入口尚未开放。
+本地真实解析与中转使用 `APP_ENV=local`、`PARSE_MODE=live`、`WECHAT_DEV_LOGIN=true`，设置回环 `HTTP_ADDR`，清除 `MOCK_MEDIA_ORIGIN`。此外设置绝对路径 `MEDIA_DIR` 与 `FFPROBE_PATH`，例如 `D:\FFmpeg\bin\ffprobe.exe`，再运行 `qushuiyin-server serve`。开发登录只在回环联调使用。生产模式使用独立环境和微信凭证。
 
 媒体按平台策略优先直连已登记主机，否则共享整批重新解析预算，再尝试中转或提供本人复制链接。地址加密保存，fallback 只允许一次且幂等；主机达到回退阈值后转 review。中转通过实际 GET、字节数、魔数及 ffprobe 校验；下载支持 HEAD 和单段 Range。JPEG/PNG 做完整解码和像素限制；静态 WebP 按透明通道转为 JPEG/PNG，并持久化 converted 标记。动态 WebP 返回 FORMAT_UNSUPPORTED，不保存首帧。
 

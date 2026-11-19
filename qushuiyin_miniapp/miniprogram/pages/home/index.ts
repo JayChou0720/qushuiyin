@@ -9,6 +9,7 @@ Page({
   data: { text: '', pasted: false, maxLength: 0, parseWait: 0, inputReady: false, busy: false, error: '', job: '', feedbackTrace: '', cleanupNotice: '', notice: '', mock: false, sequence: 0, resumeResultId: '', candidates: [] as Candidate[], platforms: [] as { name: string; available: boolean; maintenance: boolean; message: string }[] },
   jobOwner: '',
   recoverySequence: 0,
+  onShareAppMessage() { return { title: '去水印', path: '/pages/home/index' } },
   onLoad() { this.setData({ cleanupNotice: takeCleanupNotice() }) },
   onShow() { void this.reloadConfig(); void this.refreshSaveRecovery() },
   onHide() { this.recoverySequence++ },

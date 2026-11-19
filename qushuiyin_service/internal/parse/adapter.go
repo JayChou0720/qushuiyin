@@ -145,7 +145,7 @@ func (a Adapter) Parse(ctx context.Context, raw string) (_ *Result, retErr error
 			return nil, err
 		}
 		ctx = context.WithValue(ctx, upstreamPermitKey{}, permit)
-		defer func() { permit.finish(retErr == nil, errors.Is(retErr, ErrUpstreamChallenge)) }()
+		defer func() { permit.finish(retErr, a.Limits.Circuit) }()
 	}
 	canonical := u
 	if contentID(p, u) == nil {

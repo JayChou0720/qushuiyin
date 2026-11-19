@@ -50,7 +50,7 @@ func (s *Mock) relayDownload(w http.ResponseWriter, r *http.Request, user, bid, 
 		epoch, _ := strconv.ParseInt(r.URL.Query().Get("e"), 10, 64)
 		settle, e := s.reservePreviewBytes(r.Context(), user, "download:"+r.URL.Query().Get("i"), time.Unix(epoch, 0), reserve, size*s.settings().Int("ticket_byte_budget_multiplier"))
 		if e != nil {
-			fail(w, 429, "RATE_LIMITED")
+			rejectMediaBudget(w, e)
 			return
 		}
 		defer func() {

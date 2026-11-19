@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"qushuiyin/service/internal/auth"
+	"qushuiyin/service/internal/db"
 	"qushuiyin/service/internal/media"
 	"qushuiyin/service/internal/parse"
 )
@@ -342,7 +343,7 @@ func (s *Mock) prepareDelivery(ctx context.Context, b *batch, x *item, res *pers
 			x.DirectURL = ""
 			return
 		}
-		if e.Error() == "FORMAT_UNSUPPORTED" || e.Error() == "SERVICE_BUSY" {
+		if oneOf(e.Error(), "FORMAT_UNSUPPORTED", "SERVICE_BUSY", "STORAGE_CAPACITY_LOW") {
 			x.Failure = e.Error()
 			x.DirectURL = ""
 			return
@@ -517,13 +518,22 @@ func (s *Mock) commitDeliverySignals(ctx context.Context, tx *sql.Tx, b *batch, 
 
 func recordMediaMetric(ctx context.Context, tx *sql.Tx, platform, stage, outcome, mode string, n int64) error {
 	_, e := tx.ExecContext(ctx, `INSERT INTO daily_metric(id,stat_date,platform,stage,outcome,source_kind,delivery_mode,count,bytes,duration_sum_ms) VALUES (?,?,?,?,?,'none',?,?,0,0) ON DUPLICATE KEY UPDATE count=count+VALUES(count)`, auth.ID(), time.Now().In(shanghaiDay).Format("2006-01-02"), platform, stage, outcome, mode, n)
-	return e
+	if e != nil {
+		return e
+	}
+	if stage == "download_url_issued" && outcome == "direct" {
+		return db.CountOperation(ctx, tx, platform, "direct_issued", n)
+	}
+	if stage == "direct_fallback_requested" {
+		return db.CountOperation(ctx, tx, platform, "direct_fallback", n)
+	}
+	return nil
 }
 
 func deliveryLog(windows, previous map[string]hostWindow, settings interface{ Int(string) int64 }) {
 	for host, w := range windows {
 		if w.Fallback != previous[host].Fallback && w.Fallback >= settings.Int("direct_host_review_min_failures") && w.Issued > 0 && w.Fallback*100 >= w.Issued*settings.Int("direct_host_review_failure_percent") {
-			slog.Warn("download domain needs review", "host", host)
+			slog.Warn("download domain needs review", "event", "download_domain_review", "host", host)
 		}
 	}
 }

@@ -28,10 +28,12 @@ type upstreamGuard struct {
 }
 
 type upstreamState struct {
-	requests, challenges []time.Time
-	openUntil            time.Time
-	halfOpen             bool
-	epoch                uint64
+	requests, challenges       []time.Time
+	samples, failures, library []time.Time
+	cooldown                   time.Duration
+	openUntil                  time.Time
+	halfOpen                   bool
+	epoch                      uint64
 }
 
 type upstreamPermit struct {
@@ -122,7 +124,7 @@ func (p *upstreamPermit) wait(ctx context.Context) error {
 	}
 }
 
-func (p *upstreamPermit) finish(success, challenge bool) {
+func (p *upstreamPermit) finish(err error, circuit config.Circuit) {
 	g, s := p.guard, p.state
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -130,27 +132,59 @@ func (p *upstreamPermit) finish(success, challenge bool) {
 		return
 	}
 	now := g.now()
+	challenge := errors.Is(err, ErrUpstreamChallenge)
+	sourceFailure := errors.Is(err, Timeout) || errors.Is(err, InvalidResponse)
+	libraryFailure := errors.Is(err, Unavailable)
+	cooldown, reason := circuit.Open, "source_failure"
 	if p.probe {
 		s.halfOpen = false
 		if !p.used {
 			return
 		}
-		if success {
+		if err == nil {
 			s.openUntil = time.Time{}
-			s.challenges = nil
+			s.challenges, s.samples, s.failures, s.library = nil, nil, nil, nil
 			return
 		}
-	} else if challenge {
-		s.challenges = append(expireTimes(s.challenges, now.Add(-g.policy.ChallengeWindow)), now)
-		if len(s.challenges) < g.policy.ChallengeThreshold {
+		if !challenge && !sourceFailure && !libraryFailure {
 			return
 		}
-	} else {
-		return
+		cooldown, reason = s.cooldown, "probe_failed"
 	}
-	s.openUntil = now.Add(g.policy.ChallengeCooldown)
+	if challenge {
+		s.challenges = append(expireTimes(s.challenges, now.Add(-g.policy.ChallengeWindow)), now)
+		if !p.probe && len(s.challenges) < g.policy.ChallengeThreshold {
+			return
+		}
+		cooldown, reason = g.policy.ChallengeCooldown, "verification_page"
+	} else if !p.probe {
+		if !p.used || circuit.MinSamples <= 0 || circuit.Window <= 0 || circuit.Open <= 0 ||
+			err != nil && !sourceFailure && !libraryFailure {
+			return
+		}
+		cutoff := now.Add(-circuit.Window)
+		s.samples = append(expireTimes(s.samples, cutoff), now)
+		s.failures, s.library = expireTimes(s.failures, cutoff), expireTimes(s.library, cutoff)
+		if sourceFailure {
+			s.failures = append(s.failures, now)
+		}
+		if libraryFailure {
+			s.library = append(s.library, now)
+		}
+		total := int64(len(s.samples))
+		if total < circuit.MinSamples {
+			return
+		}
+		if len(s.library) > 0 && int64(len(s.library))*100 >= total*circuit.LibraryPercent {
+			reason = "library_error"
+		} else if len(s.failures) == 0 || int64(len(s.failures))*100 < total*circuit.FailurePercent {
+			return
+		}
+	}
+	s.cooldown = cooldown
+	s.openUntil = now.Add(cooldown)
 	s.epoch++
-	slog.Warn("upstream platform cooldown", "platform", p.platform, "until", s.openUntil.UTC())
+	slog.Warn("upstream platform cooldown", "event", "upstream_circuit_open", "platform", p.platform, "reason", reason, "until", s.openUntil.UTC())
 }
 
 type upstreamPermitKey struct{}

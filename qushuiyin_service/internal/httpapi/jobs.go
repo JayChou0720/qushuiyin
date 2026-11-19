@@ -49,6 +49,9 @@ type result struct {
 var urlPattern = regexp.MustCompile("https?://[^\\s<>\"'，。！？；、）》】]+")
 
 func (s *Mock) createJob(w http.ResponseWriter, r *http.Request, c credential) {
+	if limit := s.settings().Int("ip_parse_requests_per_minute"); limit > 0 && !s.admitMinute(w, "ip-parse:"+s.clientIP(r).String(), limit) {
+		return
+	}
 	var req jobRequest
 	if !s.read(w, r, &req) {
 		return

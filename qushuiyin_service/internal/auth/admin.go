@@ -8,6 +8,7 @@ import (
 	"database/sql/driver"
 	"encoding/base64"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -147,6 +148,9 @@ func (s AdminStore) Login(ctx context.Context, username string, password []byte,
 		}
 		if err = tx.Commit(); err != nil {
 			return Admin{}, "", time.Time{}, err
+		}
+		if until != nil {
+			slog.Warn("administrator login locked after repeated failures", "event", "admin_login_locked")
 		}
 		return Admin{}, "", time.Time{}, ErrAdminLogin
 	}

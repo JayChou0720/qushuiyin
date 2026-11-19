@@ -26,27 +26,42 @@ import (
 	"qushuiyin/service/internal/parse"
 )
 
-func mockCommand(ctx context.Context, command string, getenv func(string) string, out io.Writer) error {
+func serviceCommand(ctx context.Context, command string, getenv func(string) string, out io.Writer) error {
 	env := getenv("APP_ENV")
 	mode := getenv("PARSE_MODE")
-	if (env != "local" && env != "test") || (mode != "mock" && (mode != "live" || command != "serve")) {
-		return errors.New("local service requires APP_ENV=local or test and a supported PARSE_MODE")
+	production := env == "prod"
+	if env != "local" && env != "test" && !production || mode != "mock" && mode != "live" {
+		return errors.New("set APP_ENV and PARSE_MODE to supported values")
 	}
-	if mode == "live" && (getenv("MOCK_MEDIA_ORIGIN") != "" || getenv("PARSE_VIDEO_DOUYIN_COOKIE") != "") {
-		return errors.New("live mode rejects mock and cookie overrides")
+	if production && (mode != "live" || command != "serve" || getenv("WECHAT_DEV_LOGIN") != "" && getenv("WECHAT_DEV_LOGIN") != "false") {
+		return errors.New("production requires live serving with the development login disabled")
+	}
+	if command == "seed" && mode != "mock" {
+		return errors.New("dev seed requires PARSE_MODE=mock")
+	}
+	if mode == "live" && (getenv("MOCK_MEDIA_ORIGIN") != "" || getenv("PARSE_VIDEO_DOUYIN_COOKIE") != "" || getenv("PARSE_VIDEO_PROXY") != "") {
+		return errors.New("live mode rejects mock, cookie and parser proxy overrides")
 	}
 	addr := getenv("HTTP_ADDR")
 	host, port, e := net.SplitHostPort(addr)
 	if e != nil || !config.LoopbackHost(host) || port == "" || port == "0" {
 		return errors.New("HTTP_ADDR must be an explicit loopback address and port")
 	}
-	origin := getenv("MOCK_MEDIA_ORIGIN")
-	if origin == "" {
-		origin = "http://" + addr
-	}
-	u, e := config.LoopbackOrigin(origin)
-	if e != nil || u.Host != addr {
-		return errors.New("M1 mock media origin must match HTTP_ADDR")
+	origin := "http://" + addr
+	if production {
+		if _, e = config.HTTPSOrigin(getenv("PUBLIC_API_BASE_URL")); e != nil {
+			return errors.New("set an HTTPS PUBLIC_API_BASE_URL")
+		}
+		origin = getenv("PUBLIC_MEDIA_BASE_URL")
+		if _, e = config.HTTPSOrigin(origin); e != nil {
+			return errors.New("set an HTTPS PUBLIC_MEDIA_BASE_URL")
+		}
+	} else if mockOrigin := getenv("MOCK_MEDIA_ORIGIN"); mockOrigin != "" {
+		u, err := config.LoopbackOrigin(mockOrigin)
+		if err != nil || u.Host != addr {
+			return errors.New("MOCK_MEDIA_ORIGIN must match HTTP_ADDR")
+		}
+		origin = mockOrigin
 	}
 	dsn := getenv("MYSQL_DSN")
 	if dsn == "" {
@@ -64,11 +79,15 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 	}
 	defer db.Close()
 	var name string
-	if e = db.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&name); e != nil || (name != "qushuiyin_dev" && name != "qushuiyin_test") {
-		return errors.New("mock mode requires a reachable qushuiyin_dev or qushuiyin_test database")
+	if e = db.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&name); e != nil {
+		return errors.New("MYSQL_DSN must select a reachable database")
+	}
+	isTestDB := name == "qushuiyin_dev" || name == "qushuiyin_test"
+	if production == isTestDB {
+		return errors.New("configure a database for the selected environment")
 	}
 	if command == "seed" {
-		if e = seedMock(ctx, db, u.Hostname()); e != nil {
+		if e = seedMock(ctx, db, host); e != nil {
 			return errors.New("seed failed; run migrate up first")
 		}
 		fmt.Fprintln(out, "mock seed ready")
@@ -94,9 +113,12 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 		"direct_probe_range_bytes", "ip_login_requests_per_minute", "ip_admin_login_requests_per_minute",
 		"admin_password_workers", "memory_media_ticket_max_entries", "cleanup_batch_size", "database_operation_timeout_seconds",
 		"http_read_timeout_seconds", "http_write_timeout_seconds", "http_idle_timeout_seconds",
+		"database_max_open_connections", "app_login_requests_per_minute", "ip_public_config_requests_per_minute", "user_poll_requests_per_minute", "wechat_login_timeout_seconds",
+		"circuit_window_seconds", "circuit_open_seconds", "circuit_min_samples",
 	); e != nil {
 		return e
 	}
+	db.SetMaxOpenConns(int(settings.Int("database_max_open_connections")))
 	platforms, policy, e := mockPlatforms(ctx, db)
 	if e != nil {
 		return errors.New("platform configuration unavailable")
@@ -129,17 +151,37 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 		return e
 	}
 	mock.AdminHost = getenv("ADMIN_PUBLIC_HOST")
-	if mock.AdminHost == "" {
-		mock.AdminHost = addr
+	mock.AdminOrigins = map[string]bool{}
+	if production {
+		appID, secret := getenv("WECHAT_APP_ID"), getenv("WECHAT_APP_SECRET")
+		if !strings.HasPrefix(appID, "wx") || len(appID) > 64 || strings.TrimSpace(secret) == "" {
+			return errors.New("set WECHAT_APP_ID and WECHAT_APP_SECRET")
+		}
+		wechat := auth.NewWeChat(appID, secret, settings.Seconds("wechat_login_timeout_seconds"))
+		mock.WeChat = &wechat
+		adminOrigin, err := config.HTTPSOrigin("https://" + mock.AdminHost)
+		if err != nil || adminOrigin.Host != mock.AdminHost || mock.AdminHost == strings.TrimPrefix(origin, "https://") ||
+			mock.AdminHost == strings.TrimPrefix(getenv("PUBLIC_API_BASE_URL"), "https://") {
+			return errors.New("ADMIN_PUBLIC_HOST must identify the separate HTTPS administration origin")
+		}
+		mock.AdminOrigins[adminOrigin.String()] = true
+	} else {
+		if mock.AdminHost == "" {
+			mock.AdminHost = addr
+		}
+		mock.AdminOrigins[origin] = true
 	}
-	mock.AdminOrigins = map[string]bool{origin: true}
 	for _, v := range strings.Split(getenv("ADMIN_ALLOWED_ORIGINS"), ",") {
 		v = strings.TrimSpace(v)
 		if v == "" {
 			continue
 		}
-		if _, err := config.LoopbackOrigin(v); err != nil {
-			return errors.New("mock admin origins must be loopback HTTP origins")
+		if production {
+			if !mock.AdminOrigins[v] {
+				return errors.New("production admin Origin must match ADMIN_PUBLIC_HOST")
+			}
+		} else if _, err := config.LoopbackOrigin(v); err != nil {
+			return errors.New("development admin origins must be loopback HTTP origins")
 		}
 		mock.AdminOrigins[v] = true
 	}
@@ -157,6 +199,9 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 		dir, probe := getenv("MEDIA_DIR"), getenv("FFPROBE_PATH")
 		if !filepath.IsAbs(dir) || !filepath.IsAbs(probe) {
 			return errors.New("live media requires absolute MEDIA_DIR and FFPROBE_PATH")
+		}
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return errors.New("cannot initialize MEDIA_DIR")
 		}
 		if st, err := os.Stat(probe); err != nil || !st.Mode().IsRegular() {
 			return errors.New("ffprobe executable unavailable")
@@ -182,9 +227,19 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 		go mock.Relay.Clean(ctx)
 	}
 	go mock.Clean(ctx)
-	go func() { <-ctx.Done(); _ = srv.Close() }()
-	fmt.Fprintln(out, "local "+mode+" API listening at "+origin)
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), settings.Seconds("http_write_timeout_seconds"))
+		defer cancel()
+		if srv.Shutdown(shutdown) != nil {
+			_ = srv.Close()
+		}
+	}()
+	fmt.Fprintln(out, env+" "+mode+" API listening on "+addr)
 	if e = srv.Serve(listener); errors.Is(e, http.ErrServerClosed) {
+		<-stopped
 		return nil
 	}
 	return e

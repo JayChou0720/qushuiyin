@@ -1,0 +1,9 @@
+# MySQL 8.4, single host with Go and Nginx. Spec section 19.2.
+[mysqld]
+bind-address=127.0.0.1
+mysqlx=OFF
+performance_schema=OFF
+innodb_buffer_pool_size=256M
+innodb_buffer_pool_instances=1
+max_connections=32
+skip_name_resolve=ON
