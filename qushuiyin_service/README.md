@@ -9,7 +9,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ./qushuiyin_service/scripts/
 node ./qushuiyin_service/scripts/smoke-mock.mjs
 ```
 
-在微信开发者工具中打开 `qushuiyin_miniapp/`。首页点「填入示例」可测试视频，粘贴 `https://www.xiaohongshu.com/explore/10004` 可测试三张图集。结果页点击保存后会检查隐私授权和相册权限，通过后向相册保存样本。开发登录和样本用于本机联调。小程序体验版或正式版使用正式配置。
+在微信开发者工具中打开 `qushuiyin_miniapp/`。首页点「填入示例」可测试视频，粘贴 `https://www.xiaohongshu.com/explore/10004` 可测试三张图集。结果页点击保存后会检查隐私授权和相册权限，通过后向相册保存样本。当前客户端联调入口限开发版。
 
 结果页点「播放视频」或图集的「预览」可检查样本预览。以下链接仅用作 Mock 输入，不会访问真实媒体：
 
