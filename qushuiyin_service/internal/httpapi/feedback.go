@@ -54,6 +54,14 @@ func (s *Mock) encryptFeedback(id, field, value string) (any, error) {
 	if value == "" {
 		return nil, nil
 	}
+	aead, err := s.feedbackCipher()
+	if err != nil {
+		return nil, err
+	}
+	return "v1:" + base64.StdEncoding.EncodeToString(aead.Seal(nil, nil, []byte(value), []byte(id+":"+field))), nil
+}
+
+func (s *Mock) feedbackCipher() (cipher.AEAD, error) {
 	key, err := hex.DecodeString(auth.Digest(s.Sessions.Key, "local feedback encryption v1"))
 	if err != nil {
 		return nil, err
@@ -62,11 +70,31 @@ func (s *Mock) encryptFeedback(id, field, value string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	aead, err := cipher.NewGCMWithRandomNonce(block)
+	return cipher.NewGCMWithRandomNonce(block)
+}
+
+func (s *Mock) decryptFeedback(id, field string, value sql.NullString) (any, error) {
+	if !value.Valid {
+		return nil, nil
+	}
+	encoded, ok := strings.CutPrefix(value.String, "v1:")
+	if !ok {
+		return nil, errors.New("unknown feedback envelope")
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		return nil, err
 	}
-	return "v1:" + base64.StdEncoding.EncodeToString(aead.Seal(nil, nil, []byte(value), []byte(id+":"+field))), nil
+	aead, err := s.feedbackCipher()
+	if err != nil {
+		return nil, err
+	}
+	plaintext, err := aead.Open(nil, nil, ciphertext, []byte(id+":"+field))
+	if err != nil {
+		return nil, err
+	}
+	defer clear(plaintext)
+	return string(plaintext), nil
 }
 
 var shanghaiDay = time.FixedZone("Asia/Shanghai", 8*60*60)
@@ -89,13 +117,13 @@ func (s *Mock) submitFeedback(w http.ResponseWriter, r *http.Request, c credenti
 		fail(w, 400, "BAD_REQUEST")
 		return
 	}
-	if key == "" || len(key) > 100 || length < s.Settings.Int("feedback_min_chars") || length > s.Settings.Int("feedback_max_chars") || int64(utf8.RuneCountInString(req.Contact)) > s.Settings.Int("feedback_contact_max_chars") || (req.TraceID != "" && !opaqueID(req.TraceID)) || (!req.IncludeSource && req.SourceURL != "") {
+	if key == "" || len(key) > 100 || length < s.settings().Int("feedback_min_chars") || length > s.settings().Int("feedback_max_chars") || int64(utf8.RuneCountInString(req.Contact)) > s.settings().Int("feedback_contact_max_chars") || (req.TraceID != "" && !opaqueID(req.TraceID)) || (!req.IncludeSource && req.SourceURL != "") {
 		fail(w, 400, "BAD_REQUEST")
 		return
 	}
 	if req.SourceURL != "" {
 		u, err := url.Parse(req.SourceURL)
-		if err != nil || u.Scheme != "https" || u.User != nil || (u.Port() != "" && u.Port() != "443") || parse.Platform(u) == "" || int64(len(req.SourceURL)) > s.Settings.Int("max_share_text_chars") {
+		if err != nil || u.Scheme != "https" || u.User != nil || (u.Port() != "" && u.Port() != "443") || parse.Platform(u) == "" || int64(len(req.SourceURL)) > s.settings().Int("max_share_text_chars") {
 			fail(w, 400, "LINK_NOT_ALLOWED")
 			return
 		}
@@ -164,7 +192,7 @@ func (s *Mock) submitFeedback(w http.ResponseWriter, r *http.Request, c credenti
 		privateWriteError(w, err)
 		return
 	}
-	if n >= s.Settings.Int("user_feedback_per_day") {
+	if n >= s.settings().Int("user_feedback_per_day") {
 		retry := int64(start.AddDate(0, 0, 1).Sub(now)/time.Second) + 1
 		w.Header().Set("Retry-After", strconv.FormatInt(retry, 10))
 		send(w, 429, "DAILY_LIMIT_REACHED", nil, dto{"retryAfterSeconds": retry})
@@ -181,13 +209,13 @@ func (s *Mock) submitFeedback(w http.ResponseWriter, r *http.Request, c credenti
 		privateWriteError(w, err)
 		return
 	}
-	expiry := now.AddDate(0, 0, int(s.Settings.Int("feedback_retention_days")))
+	expiry := now.AddDate(0, 0, int(s.settings().Int("feedback_retention_days")))
 	_, err = tx.ExecContext(ctx, "INSERT INTO feedback(id,user_id,category,content,contact_enc,trace_id,source_url_enc,source_consent,status,created_at,updated_at,expires_at) VALUES (?,?,?,?,?,NULLIF(?,''),?,?,'pending',?,?,?)", id, c.User, req.Category, req.Content, contact, req.TraceID, source, req.IncludeSource, now, now, expiry)
 	if err == nil {
 		_, err = tx.ExecContext(ctx, "DELETE FROM idempotency_record WHERE user_id=? AND operation='feedback' AND key_value=? AND expires_at<=?", c.User, key, now)
 	}
 	if err == nil {
-		_, err = tx.ExecContext(ctx, "INSERT INTO idempotency_record(id,user_id,operation,key_value,payload_hash,object_type,object_id,expires_at) VALUES (?,?,'feedback',?,?,'feedback',?,?)", auth.ID(), c.User, key, hash, id, now.Add(s.Settings.Seconds("idempotency_ttl_seconds")))
+		_, err = tx.ExecContext(ctx, "INSERT INTO idempotency_record(id,user_id,operation,key_value,payload_hash,object_type,object_id,expires_at) VALUES (?,?,'feedback',?,?,'feedback',?,?)", auth.ID(), c.User, key, hash, id, now.Add(s.settings().Seconds("idempotency_ttl_seconds")))
 	}
 	if err == nil {
 		err = tx.Commit()
@@ -200,10 +228,10 @@ func (s *Mock) submitFeedback(w http.ResponseWriter, r *http.Request, c credenti
 }
 
 func (s *Mock) feedbackList(w http.ResponseWriter, r *http.Request, c credential) {
-	limit := s.Settings.Int("pagination_default")
+	limit := s.settings().Int("pagination_default")
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		n, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil || n < 1 || n > s.Settings.Int("pagination_max") {
+		if err != nil || n < 1 || n > s.settings().Int("pagination_max") {
 			fail(w, 400, "BAD_REQUEST")
 			return
 		}

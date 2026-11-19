@@ -29,10 +29,10 @@ type adminPage struct {
 }
 
 func (s *Mock) readAdminPage(w http.ResponseWriter, r *http.Request) (adminPage, bool) {
-	p := adminPage{limit: s.Settings.Int("pagination_default")}
+	p := adminPage{limit: s.settings().Int("pagination_default")}
 	if value := r.URL.Query().Get("limit"); value != "" {
 		limit, err := strconv.ParseInt(value, 10, 64)
-		if err != nil || limit < 1 || limit > s.Settings.Int("pagination_max") {
+		if err != nil || limit < 1 || limit > s.settings().Int("pagination_max") {
 			fail(w, 400, "BAD_REQUEST")
 			return p, false
 		}
@@ -158,6 +158,66 @@ func (s *Mock) adminFeedbackDetail(w http.ResponseWriter, r *http.Request, _ aut
 	ok(w, 200, f.public())
 }
 
+func (s *Mock) adminFeedbackPrivate(w http.ResponseWriter, r *http.Request, a auth.Admin) {
+	var req struct{ Reason string }
+	if !s.read(w, r, &req) {
+		return
+	}
+	reason, valid := adminReason(req.Reason)
+	if !valid {
+		fail(w, 400, "BAD_REQUEST")
+		return
+	}
+	ctx := r.Context()
+	tx, err := s.Admin.DB.BeginTx(ctx, nil)
+	if err != nil {
+		fail(w, 503, "SERVICE_BUSY")
+		return
+	}
+	defer tx.Rollback()
+	id := r.PathValue("id")
+	// Use the same owner-then-feedback lock order as deletion and updates.
+	var user, status string
+	if err = tx.QueryRowContext(ctx, "SELECT user_id FROM feedback WHERE id=?", id).Scan(&user); err != nil {
+		adminFeedbackReadError(w, err)
+		return
+	}
+	if err = tx.QueryRowContext(ctx, "SELECT status FROM app_user WHERE id=? FOR SHARE", user).Scan(&status); err != nil {
+		adminFeedbackReadError(w, err)
+		return
+	}
+	if status != "active" {
+		fail(w, 404, "RESOURCE_NOT_FOUND")
+		return
+	}
+	var contact, source, trace sql.NullString
+	err = tx.QueryRowContext(ctx, "SELECT contact_enc,IF(source_consent,source_url_enc,NULL),trace_id FROM feedback WHERE id=? AND user_id=? AND expires_at>UTC_TIMESTAMP(3) FOR SHARE", id, user).Scan(&contact, &source, &trace)
+	if err != nil {
+		adminFeedbackReadError(w, err)
+		return
+	}
+	contactValue, err := s.decryptFeedback(id, "contact", contact)
+	var sourceValue, traceValue any
+	if err == nil {
+		sourceValue, err = s.decryptFeedback(id, "source", source)
+	}
+	if trace.Valid {
+		traceValue = trace.String
+	}
+	if err == nil {
+		err = auditChange(ctx, tx, a.ID, "feedback_private_view", "feedback", id, reason, requestID(w), nil,
+			dto{"hasContact": contact.Valid, "hasSource": source.Valid, "hasTrace": trace.Valid})
+	}
+	if err == nil {
+		err = tx.Commit()
+	}
+	if err != nil {
+		fail(w, 503, "SERVICE_BUSY")
+		return
+	}
+	ok(w, 200, dto{"contact": contactValue, "sourceUrl": sourceValue, "traceId": traceValue})
+}
+
 func (s *Mock) adminFeedbackUpdate(w http.ResponseWriter, r *http.Request, a auth.Admin) {
 	var req struct {
 		ExpectedVersion int64
@@ -174,7 +234,7 @@ func (s *Mock) adminFeedbackUpdate(w http.ResponseWriter, r *http.Request, a aut
 	}
 	if req.Reply != nil {
 		reply := strings.TrimSpace(*req.Reply)
-		if reply == "" || int64(utf8.RuneCountInString(reply)) > s.Settings.Int("feedback_max_chars") {
+		if reply == "" || int64(utf8.RuneCountInString(reply)) > s.settings().Int("feedback_max_chars") {
 			fail(w, 400, "BAD_REQUEST")
 			return
 		}
@@ -234,7 +294,7 @@ func (s *Mock) adminFeedbackUpdate(w http.ResponseWriter, r *http.Request, a aut
 		return
 	}
 	if after.status == "closed" {
-		after.expiry = minTime(before.expiry, now.AddDate(0, 0, int(s.Settings.Int("feedback_closed_retention_days"))))
+		after.expiry = minTime(before.expiry, now.AddDate(0, 0, int(s.settings().Int("feedback_closed_retention_days"))))
 	}
 	after.version++
 	after.updated = now

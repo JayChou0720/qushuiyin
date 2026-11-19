@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -21,12 +22,13 @@ import (
 )
 
 type Platform struct {
-	Name   string `json:"platform"`
-	Status string `json:"status"`
-	Video  bool   `json:"videoEnabled"`
-	Image  bool   `json:"imageEnabled"`
-	Cover  bool   `json:"coverEnabled"`
-	Text   bool   `json:"textEnabled"`
+	Name               string `json:"platform"`
+	Status             string `json:"status"`
+	Video              bool   `json:"videoEnabled"`
+	Image              bool   `json:"imageEnabled"`
+	Cover              bool   `json:"coverEnabled"`
+	Text               bool   `json:"textEnabled"`
+	MaintenanceMessage string `json:"maintenanceMessage,omitempty"`
 }
 type Mock struct {
 	refreshGates     keyedMutex
@@ -46,6 +48,9 @@ type Mock struct {
 	AdminOrigins     map[string]bool
 	adminHashSlots   chan struct{}
 	Settings         config.Values
+	ManagedConfig    bool
+	settingsSnapshot atomic.Pointer[config.Values]
+	configGate       sync.Mutex
 	Sessions         auth.Store
 	TicketKey        []byte
 	Adapter          parse.Adapter
@@ -103,6 +108,8 @@ func messageFor(code string) string {
 		return "今日操作次数已达上限，请稍后再试"
 	case "VERSION_CONFLICT":
 		return "记录已更新，请刷新后重试"
+	case "LAST_SUPER_ADMIN":
+		return "请至少保留一个启用的超级管理员"
 	case "FEEDBACK_CLOSED":
 		return "该工单已关闭"
 	case "PREPARE_TIMEOUT":
@@ -147,7 +154,7 @@ func requestID(w http.ResponseWriter) string {
 	return id
 }
 func (s *Mock) read(w http.ResponseWriter, r *http.Request, into any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, s.Settings.Int("max_request_body_bytes"))
+	r.Body = http.MaxBytesReader(w, r.Body, s.settings().Int("max_request_body_bytes"))
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
 	if err := d.Decode(into); err != nil {
@@ -189,13 +196,13 @@ func (s *Mock) rateUntil(key string, cap int64, expires time.Time) bool {
 	now := time.Now()
 	m := s.rates[key]
 	if !now.Before(m.Until) {
-		if len(s.rates) >= int(s.Settings.Int("memory_rate_limit_max_subjects")) {
+		if len(s.rates) >= int(s.settings().Int("memory_rate_limit_max_subjects")) {
 			for k, v := range s.rates {
 				if !now.Before(v.Until) {
 					delete(s.rates, k)
 				}
 			}
-			if len(s.rates) >= int(s.Settings.Int("memory_rate_limit_max_subjects")) {
+			if len(s.rates) >= int(s.settings().Int("memory_rate_limit_max_subjects")) {
 				return false
 			}
 		}
@@ -225,13 +232,17 @@ func (s *Mock) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	allowed := s.minute("login:"+host, s.Settings.Int("ip_login_requests_per_minute"))
+	allowed := s.minute("login:"+host, s.settings().Int("ip_login_requests_per_minute"))
 	s.mu.Unlock()
 	if !allowed {
 		fail(w, 429, "RATE_LIMITED")
 		return
 	}
-	sess, err := s.Sessions.DevLogin(r.Context(), name)
+	store := s.Sessions
+	if s.ManagedConfig {
+		store.TTL = s.settings().Seconds("session_ttl_seconds")
+	}
+	sess, err := store.DevLogin(r.Context(), name)
 	if err != nil {
 		fail(w, 503, "SERVICE_BUSY")
 		return
@@ -239,14 +250,29 @@ func (s *Mock) login(w http.ResponseWriter, r *http.Request) {
 	ok(w, 200, sess)
 }
 func (s *Mock) publicConfig(w http.ResponseWriter, r *http.Request) {
+	settings := s.settings()
 	keys := []string{"max_share_text_chars", "max_candidate_urls", "max_image_batch_count", "max_title_chars", "max_description_chars", "config_client_cache_seconds", "client_album_concurrency", "client_parse_wait_seconds", "poll_interval_ms", "client_download_timeout_seconds", "max_video_bytes", "max_image_bytes", "feedback_min_chars", "feedback_max_chars", "feedback_contact_max_chars", "pagination_default", "pagination_max", "event_batch_max", "client_queue_max", "client_event_retention_hours", "client_event_retry_initial_seconds", "client_event_retry_max_seconds", "history_max_count", "history_ttl_days", "thumbnail_local_budget_bytes"}
 	limits := map[string]json.RawMessage{}
 	for _, k := range keys {
-		limits[k] = s.Settings.Data[k]
+		limits[k] = settings.Data[k]
 	}
-	configData := dto{"platforms": s.Platforms, "limits": limits, "features": dto{"mock": s.Relay == nil, "devLogin": s.DevLogin, "directPreviewEnabled": s.Settings.Bool("direct_preview_enabled")}, "privacyVersion": privacyVersion, "notice": "", "help": dto{}, "serviceStatus": "normal"}
+	platforms := s.Platforms
+	if s.ManagedConfig {
+		entries, err := loadManagedPlatforms(r.Context(), s.Sessions.DB)
+		if err != nil {
+			fail(w, 503, "SERVICE_BUSY")
+			return
+		}
+		platforms = make([]Platform, 0, len(entries))
+		for _, p := range entries {
+			c := p.Capabilities
+			platforms = append(platforms, Platform{Name: p.Platform, Status: p.Status, Video: c.VideoEnabled, Image: c.ImageEnabled, Cover: c.CoverEnabled, Text: c.TextEnabled, MaintenanceMessage: p.MaintenanceMessage})
+		}
+	}
+	configData := dto{"platforms": platforms, "limits": limits, "features": dto{"mock": s.Relay == nil, "devLogin": s.DevLogin, "directPreviewEnabled": settings.Bool("direct_preview_enabled")}, "privacyVersion": privacyVersion, "notice": settings.Text("public_notice"), "help": dto{"message": settings.Text("public_help")}, "serviceStatus": "normal"}
 	raw, _ := json.Marshal(configData)
-	etag := auth.Digest(s.Sessions.Key, string(raw))
+	versions, _ := json.Marshal(settings.Versions)
+	etag := auth.Digest(s.Sessions.Key, string(raw)+string(versions))
 	w.Header().Set("ETag", "\""+etag+"\"")
 	if r.Header.Get("If-None-Match") == w.Header().Get("ETag") {
 		w.WriteHeader(304)
@@ -256,13 +282,23 @@ func (s *Mock) publicConfig(w http.ResponseWriter, r *http.Request) {
 	configData["serverTime"] = time.Now().UTC()
 	ok(w, 200, configData)
 }
+
+func (s *Mock) settings() config.Values {
+	if current := s.settingsSnapshot.Load(); current != nil {
+		return *current
+	}
+	return s.Settings
+}
 func (s *Mock) Handler(ctx context.Context) http.Handler {
+	if s.Relay != nil && s.ManagedConfig {
+		s.Relay.CurrentSettings = s.settings
+	}
 	s.hostWindows = map[string]hostWindow{}
 	s.parseContext = ctx
-	if workers := s.Settings.Int("parser_workers"); workers > 0 {
+	if workers := s.settings().Int("parser_workers"); workers > 0 {
 		s.parsePool = make(chan struct{}, workers)
 	}
-	s.parseCache = newParseCache(s.Settings.Seconds("parse_cache_ttl_seconds"), int(s.Settings.Int("memory_parse_cache_max_entries")))
+	s.parseCache = newParseCache(s.settings().Seconds("parse_cache_ttl_seconds"), int(s.settings().Int("memory_parse_cache_max_entries")))
 	s.jobs = map[string]*job{}
 	s.results = map[string]*result{}
 	s.batches = map[string]*batch{}
@@ -270,7 +306,7 @@ func (s *Mock) Handler(ctx context.Context) http.Handler {
 	s.keys = map[string]idem{}
 	s.rates = map[string]meter{}
 	s.mediaConnections = map[string]int64{}
-	s.mediaWork = make(chan struct{}, s.Settings.Int("media_workers"))
+	s.mediaWork = make(chan struct{}, s.settings().Int("media_workers"))
 	m := http.NewServeMux()
 	if s.Admin.DB != nil && s.AdminHost != "" {
 		s.adminRoutes(m)
@@ -300,6 +336,9 @@ func (s *Mock) Handler(ctx context.Context) http.Handler {
 	m.HandleFunc("GET /v1/feedbacks", s.authorized(s.feedbackList))
 	m.HandleFunc("GET /v1/feedbacks/{feedbackId}", s.authorized(s.feedbackDetail))
 	m.HandleFunc("POST /v1/events", s.authorized(s.ingestEvents))
+	m.HandleFunc("GET /v1/me", s.authorized(func(w http.ResponseWriter, _ *http.Request, c credential) {
+		ok(w, 200, dto{"userId": c.User})
+	}))
 	m.HandleFunc("DELETE /v1/me/data", s.authorized(s.deleteData))
 	m.HandleFunc("GET /media/download/{mediaObjectId}", s.download("relay"))
 	m.HandleFunc("GET /media/mock-source/direct/{mediaObjectId}", s.download("direct"))
@@ -366,12 +405,12 @@ func (s *Mock) replayWithKeys(w http.ResponseWriter, r *http.Request, c credenti
 		return "", idem{}, false
 	}
 	if rec.ID == "" {
-		if !s.Persistent && int64(len(keys)) >= s.Settings.Int("memory_mock_max_entries") {
+		if !s.Persistent && int64(len(keys)) >= s.settings().Int("memory_mock_max_entries") {
 			fail(w, 503, "SERVICE_BUSY")
 			return "", idem{}, false
 		}
 		rec.Digest = digest
-		rec.Expires = now.Add(s.Settings.Seconds("idempotency_ttl_seconds"))
+		rec.Expires = now.Add(s.settings().Seconds("idempotency_ttl_seconds"))
 	}
 	return key, rec, true
 }
@@ -384,7 +423,7 @@ func parseError(err error) string {
 }
 func (s *Mock) Clean(ctx context.Context) {
 	s.cleanDatabase(ctx, time.Now().UTC())
-	ticker := time.NewTicker(s.Settings.Seconds("media_gc_interval_seconds"))
+	ticker := time.NewTicker(s.settings().Seconds("media_gc_interval_seconds"))
 	defer ticker.Stop()
 	for {
 		select {

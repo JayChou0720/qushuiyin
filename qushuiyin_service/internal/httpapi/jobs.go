@@ -57,7 +57,7 @@ func (s *Mock) createJob(w http.ResponseWriter, r *http.Request, c credential) {
 		fail(w, 400, "INPUT_EMPTY")
 		return
 	}
-	if int64(utf8.RuneCountInString(req.ShareText)) > s.Settings.Int("max_share_text_chars") {
+	if int64(utf8.RuneCountInString(req.ShareText)) > s.settings().Int("max_share_text_chars") {
 		fail(w, 400, "INPUT_TOO_LONG")
 		return
 	}
@@ -87,7 +87,7 @@ func (s *Mock) createJob(w http.ResponseWriter, r *http.Request, c credential) {
 		fail(w, 400, "NO_LINK_FOUND")
 		return
 	}
-	if int64(len(candidates)) > s.Settings.Int("max_candidate_urls") {
+	if int64(len(candidates)) > s.settings().Int("max_candidate_urls") {
 		fail(w, 400, "TOO_MANY_LINKS")
 		return
 	}
@@ -108,7 +108,16 @@ func (s *Mock) createJob(w http.ResponseWriter, r *http.Request, c credential) {
 		fail(w, 400, "LINK_NOT_ALLOWED")
 		return
 	}
-	switch s.Adapter.Policy[p].Status {
+	policy, err := s.sourcePolicy(r.Context(), u)
+	if err != nil {
+		code, status := "SERVICE_BUSY", 503
+		if err == parse.Forbidden {
+			code, status = string(parse.Forbidden), 400
+		}
+		fail(w, status, code)
+		return
+	}
+	switch policy.Status {
 	case "enabled":
 	case "maintenance":
 		fail(w, 503, "PLATFORM_MAINTENANCE")
@@ -144,15 +153,15 @@ func (s *Mock) createJob(w http.ResponseWriter, r *http.Request, c credential) {
 			active++
 		}
 	}
-	if int64(active) >= s.Settings.Int("user_active_parse_jobs") || s.parsePool == nil || int64(len(s.jobs)) >= s.Settings.Int("memory_mock_max_entries") {
+	if int64(active) >= s.settings().Int("user_active_parse_jobs") || s.parsePool == nil || int64(len(s.jobs)) >= s.settings().Int("memory_mock_max_entries") {
 		fail(w, 503, "SERVICE_BUSY")
 		return
 	}
-	if !s.minute("parse:"+c.User, s.Settings.Int("user_parse_per_minute")) {
+	if !s.minute("parse:"+c.User, s.settings().Int("user_parse_per_minute")) {
 		fail(w, 429, "RATE_LIMITED")
 		return
 	}
-	j := &job{ID: auth.ID(), User: c.User, Platform: p, FlowID: req.FlowID, Status: "QUEUED", Created: now, Deadline: now.Add(s.Settings.Seconds("parse_job_timeout_seconds")), Expires: now.Add(s.Settings.Seconds("result_ttl_seconds"))}
+	j := &job{ID: auth.ID(), User: c.User, Platform: p, FlowID: req.FlowID, Status: "QUEUED", Created: now, Deadline: now.Add(s.settings().Seconds("parse_job_timeout_seconds")), Expires: now.Add(s.settings().Seconds("result_ttl_seconds"))}
 	// Preserve the selected URL verbatim for replay. Normalize only the history key.
 	canonical := *u
 	canonical.Host = strings.ToLower(canonical.Host)
@@ -218,7 +227,7 @@ func (s *Mock) runJob(ctx context.Context, j *job, selected, cacheKey string, fo
 	j.Status, j.ResultID = "SUCCEEDED", res.ID
 }
 func (s *Mock) jobAccepted(w http.ResponseWriter, j *job) {
-	ok(w, 202, dto{"jobId": j.ID, "status": j.Status, "pollAfterMs": s.Settings.Int("poll_interval_ms"), "deadlineAt": j.Deadline})
+	ok(w, 202, dto{"jobId": j.ID, "status": j.Status, "pollAfterMs": s.settings().Int("poll_interval_ms"), "deadlineAt": j.Deadline})
 }
 func (s *Mock) jobStatus(w http.ResponseWriter, r *http.Request, c credential) {
 	if s.Persistent {

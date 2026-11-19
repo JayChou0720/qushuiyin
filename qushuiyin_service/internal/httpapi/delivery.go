@@ -88,6 +88,19 @@ func (s *Mock) deliveryPolicy(ctx context.Context, res *result, a asset) (string
 	return p, nil
 }
 
+func mediaCapabilityError(p parse.Capability, a asset) string {
+	if p.Status == "maintenance" {
+		return "PLATFORM_MAINTENANCE"
+	}
+	if p.Status != "enabled" {
+		return "PLATFORM_UNSUPPORTED"
+	}
+	if a.Role == "cover" && !p.Cover || a.Role != "cover" && (a.Kind == "video" && !p.Video || a.Kind == "image" && !p.Image) {
+		return "CONTENT_TYPE_UNSUPPORTED"
+	}
+	return ""
+}
+
 func (s *Mock) callParser(ctx context.Context, source string) (*parse.Result, error) {
 	select {
 	case s.parsePool <- struct{}{}:
@@ -95,7 +108,23 @@ func (s *Mock) callParser(ctx context.Context, source string) (*parse.Result, er
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	return s.Adapter.Parse(ctx, source)
+	adapter := s.Adapter
+	if s.ManagedConfig {
+		u, err := url.Parse(source)
+		if err != nil {
+			return nil, parse.Code("LINK_NOT_ALLOWED")
+		}
+		platform := parse.Platform(u)
+		policy, err := s.sourcePolicy(ctx, u)
+		if err != nil {
+			return nil, err
+		}
+		adapter.Policy = map[string]parse.Capability{platform: policy}
+		limits := s.settings().Limits()
+		limits.Upstream = adapter.Limits.Upstream
+		adapter.Limits = limits
+	}
+	return adapter.Parse(ctx, source)
 }
 
 // Reserve the batch-wide budget before the network call. A crash spends that
@@ -136,12 +165,12 @@ func (s *Mock) refreshSources(ctx context.Context, b *batch, res *persistentResu
 		return nil
 	}
 	if direct {
-		if latest.ReparseAttempts >= s.Settings.Int("direct_reparse_attempts") {
+		if latest.ReparseAttempts >= s.settings().Int("direct_reparse_attempts") {
 			return sql.ErrNoRows
 		}
 		latest.ReparseAttempts++
 	} else {
-		if latest.RefreshAttempt >= s.Settings.Int("resource_refresh_attempts_per_batch") {
+		if latest.RefreshAttempt >= s.settings().Int("resource_refresh_attempts_per_batch") {
 			return sql.ErrNoRows
 		}
 		latest.RefreshAttempt++
@@ -165,9 +194,13 @@ func (s *Mock) refreshSources(ctx context.Context, b *batch, res *persistentResu
 	if e = s.Sessions.DB.QueryRowContext(ctx, "SELECT source_hash FROM parse_result WHERE id=? AND user_id=?", res.ID, b.User).Scan(&hash); e != nil {
 		return e
 	}
-	call, cancel := context.WithTimeout(ctx, s.Settings.Seconds("parser_call_timeout_seconds"))
+	call, cancel := context.WithTimeout(ctx, s.settings().Seconds("parser_call_timeout_seconds"))
 	defer cancel()
-	fresh, e := s.parseCache.resolve(call, hash, true, func() (*parse.Result, error) {
+	cacheKey, e := s.platformCacheKey(call, res.Value.Platform, res.history.URL, hash)
+	if e != nil {
+		return e
+	}
+	fresh, e := s.parseCache.resolve(call, cacheKey, true, func() (*parse.Result, error) {
 		v, e := s.callParser(call, res.history.URL)
 		if e == nil && !sameResources(res.Value, v) {
 			return nil, parse.Code("CONTENT_CHANGED")
@@ -257,7 +290,7 @@ func (s *Mock) prepareDelivery(ctx context.Context, b *batch, x *item, res *pers
 		a = v.asset()
 	}
 	d := s.Relay.Decide(ctx, res.Value.Platform, policy, a, x.Fallback)
-	for policy == "direct_preferred" && !x.Fallback && d.Unregistered && b.ReparseAttempts < s.Settings.Int("direct_reparse_attempts") {
+	for policy == "direct_preferred" && !x.Fallback && d.Unregistered && b.ReparseAttempts < s.settings().Int("direct_reparse_attempts") {
 		e = s.refreshSources(ctx, b, res, true)
 		if e != nil {
 			if e.Error() == "CONTENT_CHANGED" {
@@ -319,7 +352,7 @@ func (s *Mock) prepareDelivery(ctx context.Context, b *batch, x *item, res *pers
 			x.DirectURL = ""
 			return
 		}
-		if e.Error() == "FILE_TOO_LARGE" || d.Size != nil && x.Asset.Kind == "video" && *d.Size > s.Settings.Int("max_video_bytes") {
+		if e.Error() == "FILE_TOO_LARGE" || d.Size != nil && x.Asset.Kind == "video" && *d.Size > s.settings().Int("max_video_bytes") {
 			d.Failure = "FILE_TOO_LARGE"
 		} else {
 			d.Failure = "DIRECT_DOWNLOAD_UNAVAILABLE"
@@ -380,7 +413,7 @@ func (s *Mock) lockHostWindows(signals []item) (map[string]hostWindow, func()) {
 
 	s.mu.Lock()
 	now := time.Now()
-	limit := s.Settings.Int("memory_rate_limit_max_subjects")
+	limit := s.settings().Int("memory_rate_limit_max_subjects")
 	if int64(len(s.hostWindows)+len(hosts)) > limit {
 		for host, w := range s.hostWindows {
 			if !w.pending && !now.Before(w.Until) {
@@ -445,7 +478,7 @@ func (s *Mock) commitDeliverySignals(ctx context.Context, tx *sql.Tx, b *batch, 
 		if e != nil {
 			return e
 		}
-		v, e := tx.ExecContext(ctx, "UPDATE usage_counter SET value=value+? WHERE subject_key=? AND stat_date=? AND kind='copy_link' AND value<=?", x.CopyPending, b.User, day, s.Settings.Int("user_copy_link_per_day")-x.CopyPending)
+		v, e := tx.ExecContext(ctx, "UPDATE usage_counter SET value=value+? WHERE subject_key=? AND stat_date=? AND kind='copy_link' AND value<=?", x.CopyPending, b.User, day, s.settings().Int("user_copy_link_per_day")-x.CopyPending)
 		if e != nil {
 			return e
 		}
@@ -462,7 +495,7 @@ func (s *Mock) commitDeliverySignals(ctx context.Context, tx *sql.Tx, b *batch, 
 		return errors.New("domain window capacity")
 	}
 	if !time.Now().Before(w.Until) {
-		w = hostWindow{Until: time.Now().Add(s.Settings.Seconds("direct_host_review_window_seconds"))}
+		w = hostWindow{Until: time.Now().Add(s.settings().Seconds("direct_host_review_window_seconds"))}
 	}
 	falls := int64(0)
 	if x.FallbackPending {
@@ -474,7 +507,7 @@ func (s *Mock) commitDeliverySignals(ctx context.Context, tx *sql.Tx, b *batch, 
 	if _, e := tx.ExecContext(ctx, "UPDATE download_domain SET direct_issued_total=direct_issued_total+?,direct_fallback_total=direct_fallback_total+?,version=version+1 WHERE host=?", x.DirectIssuedPending, falls, x.DirectHost); e != nil {
 		return e
 	}
-	if w.Fallback >= s.Settings.Int("direct_host_review_min_failures") && w.Issued > 0 && w.Fallback*100 >= w.Issued*s.Settings.Int("direct_host_review_failure_percent") {
+	if w.Fallback >= s.settings().Int("direct_host_review_min_failures") && w.Issued > 0 && w.Fallback*100 >= w.Issued*s.settings().Int("direct_host_review_failure_percent") {
 		if _, e := tx.ExecContext(ctx, "UPDATE download_domain SET status='review',version=version+1 WHERE host=? AND status='registered'", x.DirectHost); e != nil {
 			return e
 		}

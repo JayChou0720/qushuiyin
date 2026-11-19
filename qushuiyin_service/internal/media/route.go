@@ -20,7 +20,7 @@ func (r *Relay) Decide(ctx context.Context, platform, policy string, a parse.Ass
 	if policy == "relay_only" && r.Domains == nil {
 		return Decision{Mode: "relay"}
 	}
-	l := r.Settings.Limits()
+	l := r.settings().Limits()
 	o := (Probe{Client: r.Client, Limits: l, Domains: r.Domains, Policy: policy}).Inspect(ctx, platform, a)
 	d := Decision{URL: o.FinalURL, Host: o.Host, MIME: o.Type, Size: o.Size, Expires: time.Now().UTC().Add(l.AssumedTTL), Unregistered: o.Host != "" && o.Domain != "registered"}
 	validType := o.Type == "image/jpeg" || o.Type == "image/png" || o.Type == "image/webp"
@@ -39,18 +39,18 @@ func (r *Relay) Decide(ctx context.Context, platform, policy string, a parse.Ass
 		d.Mode = "direct"
 		return d
 	}
-	limit := r.Settings.Int("max_image_bytes")
+	limit := r.settings().Int("max_image_bytes")
 	if a.Kind == "video" {
-		limit = r.Settings.Int("relay_max_video_bytes")
+		limit = r.settings().Int("relay_max_video_bytes")
 	}
 	if policy != "copy_only" && (o.Size == nil || *o.Size <= limit) {
 		d.Mode = "relay"
 		return d
 	}
 	d.Failure = "DIRECT_DOWNLOAD_UNAVAILABLE"
-	maximum := r.Settings.Int("max_image_bytes")
+	maximum := r.settings().Int("max_image_bytes")
 	if a.Kind == "video" {
-		maximum = r.Settings.Int("max_video_bytes")
+		maximum = r.settings().Int("max_video_bytes")
 	}
 	if o.Size != nil && *o.Size > maximum {
 		d.Failure = "FILE_TOO_LARGE"

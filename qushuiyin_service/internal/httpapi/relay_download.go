@@ -12,9 +12,10 @@ func (s *Mock) relayDownload(w http.ResponseWriter, r *http.Request, user, bid, 
 		fail(w, 405, "BAD_REQUEST")
 		return
 	}
-	var key, mime, hash string
+	started := time.Now()
+	var key, mime, hash, platform, adapter string
 	var size int64
-	err := s.Sessions.DB.QueryRowContext(r.Context(), `SELECT f.storage_key,f.mime_type,f.sha256,f.size_bytes FROM media_object o JOIN media_file f ON f.id=o.file_id JOIN save_batch_item i ON i.media_object_id=o.id JOIN save_batch b ON b.id=i.batch_id WHERE o.id=? AND o.user_id=? AND i.user_id=? AND b.user_id=? AND b.id=? AND o.status='ready' AND f.status='ready' AND i.prepare_status='READY' AND b.cancel_requested=FALSE AND o.expires_at>UTC_TIMESTAMP(3) AND f.expires_at>UTC_TIMESTAMP(3) AND b.expires_at>UTC_TIMESTAMP(3)`, oid, user, user, user, bid).Scan(&key, &mime, &hash, &size)
+	err := s.Sessions.DB.QueryRowContext(r.Context(), `SELECT f.storage_key,f.mime_type,f.sha256,f.size_bytes,p.platform,p.adapter_version FROM media_object o JOIN media_file f ON f.id=o.file_id JOIN save_batch_item i ON i.media_object_id=o.id JOIN save_batch b ON b.id=i.batch_id JOIN parse_result p ON p.id=b.result_id AND p.user_id=b.user_id WHERE o.id=? AND o.user_id=? AND i.user_id=? AND b.user_id=? AND b.id=? AND o.status='ready' AND f.status='ready' AND i.prepare_status='READY' AND b.cancel_requested=FALSE AND o.expires_at>UTC_TIMESTAMP(3) AND f.expires_at>UTC_TIMESTAMP(3) AND b.expires_at>UTC_TIMESTAMP(3)`, oid, user, user, user, bid).Scan(&key, &mime, &hash, &size, &platform, &adapter)
 	if err != nil {
 		fail(w, 404, "RESOURCE_NOT_FOUND")
 		return
@@ -47,14 +48,17 @@ func (s *Mock) relayDownload(w http.ResponseWriter, r *http.Request, user, bid, 
 			reserve = size
 		}
 		epoch, _ := strconv.ParseInt(r.URL.Query().Get("e"), 10, 64)
-		settle, e := s.reservePreviewBytes(r.Context(), user, "download:"+r.URL.Query().Get("i"), time.Unix(epoch, 0), reserve, size*s.Settings.Int("ticket_byte_budget_multiplier"))
+		settle, e := s.reservePreviewBytes(r.Context(), user, "download:"+r.URL.Query().Get("i"), time.Unix(epoch, 0), reserve, size*s.settings().Int("ticket_byte_budget_multiplier"))
 		if e != nil {
 			fail(w, 429, "RATE_LIMITED")
 			return
 		}
-		defer func() { settle(counted.sent) }()
+		defer func() {
+			settle(counted.sent)
+			s.reportTransfer(observation{User: user, Trace: bid, Platform: platform, Adapter: adapter, Stage: "download", Mode: "relay", Started: started}, counted)
+		}()
 	}
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(s.Settings.Seconds("client_download_timeout_seconds")))
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(s.settings().Seconds("client_download_timeout_seconds")))
 	w.Header().Set("Content-Type", mime)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("ETag", "\""+hash+"\"")

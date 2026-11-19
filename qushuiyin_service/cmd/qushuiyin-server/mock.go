@@ -141,6 +141,7 @@ func mockCommand(ctx context.Context, command string, getenv func(string) string
 	}
 	// Persist tasks before returning; bounded workers publish their results.
 	mock.Persistent = true
+	mock.ManagedConfig = true
 	mock.AdapterTag = parse.MockVersion
 	if mode == "live" {
 		mock.AdapterTag = parse.Version + ":" + parse.DouyinH5Version

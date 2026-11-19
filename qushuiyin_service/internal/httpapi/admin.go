@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"qushuiyin/service/internal/admin"
 	"qushuiyin/service/internal/auth"
 )
 
@@ -38,7 +39,7 @@ func (s *Mock) adminLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	allowed := s.minute("admin-login:"+host, s.Settings.Int("ip_admin_login_requests_per_minute"))
+	allowed := s.minute("admin-login:"+host, s.settings().Int("ip_admin_login_requests_per_minute"))
 	s.mu.Unlock()
 	if !allowed {
 		fail(w, 429, "RATE_LIMITED")
@@ -62,7 +63,14 @@ func (s *Mock) adminLogin(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503, "SERVICE_BUSY")
 		return
 	}
-	a, token, expires, err := s.Admin.Login(r.Context(), req.Username, password, host)
+	store := s.Admin
+	if s.ManagedConfig {
+		settings := s.settings()
+		store.TTL = settings.Seconds("admin_session_ttl_seconds")
+		store.Lockout = settings.Seconds("admin_lockout_seconds")
+		store.MaxFailures = settings.Int("admin_login_max_failures")
+	}
+	a, token, expires, err := store.Login(r.Context(), req.Username, password, host)
 	if errors.Is(err, auth.ErrAdminLogin) {
 		fail(w, 401, "ADMIN_LOGIN_FAILED")
 		return
@@ -71,7 +79,7 @@ func (s *Mock) adminLogin(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503, "SERVICE_BUSY")
 		return
 	}
-	setAdminCookie(w, token, expires, int(s.Admin.TTL/time.Second))
+	setAdminCookie(w, token, expires, int(store.TTL/time.Second))
 	ok(w, 200, a)
 }
 func (s *Mock) withAdmin(next func(http.ResponseWriter, *http.Request, auth.Admin, string)) http.HandlerFunc {
@@ -104,13 +112,31 @@ func (s *Mock) adminRole(next func(http.ResponseWriter, *http.Request, auth.Admi
 }
 
 func (s *Mock) adminRoutes(m *http.ServeMux) {
-	s.adminHashSlots = make(chan struct{}, s.Settings.Int("admin_password_workers"))
+	s.adminHashSlots = make(chan struct{}, s.settings().Int("admin_password_workers"))
 	m.HandleFunc("POST /admin/v1/sessions", s.adminGuard(s.adminLogin))
 	m.HandleFunc("GET /admin/v1/me", s.withAdmin(func(w http.ResponseWriter, _ *http.Request, a auth.Admin, _ string) { ok(w, 200, a) }))
 	m.HandleFunc("GET /admin/v1/feedbacks", s.adminRole(s.adminFeedbackList, "super_admin", "operator", "support"))
 	m.HandleFunc("GET /admin/v1/feedbacks/{id}", s.adminRole(s.adminFeedbackDetail, "super_admin", "operator", "support"))
+	m.HandleFunc("POST /admin/v1/feedbacks/{id}/private", s.adminRole(s.adminFeedbackPrivate, "super_admin"))
 	m.HandleFunc("PATCH /admin/v1/feedbacks/{id}", s.adminRole(s.adminFeedbackUpdate, "super_admin", "operator", "support"))
 	m.HandleFunc("GET /admin/v1/audit-logs", s.adminRole(s.adminAuditList, "super_admin", "auditor"))
+	m.HandleFunc("GET /admin/v1/download-domains", s.adminRole(s.adminDomains, "super_admin", "tech_admin"))
+	m.HandleFunc("PATCH /admin/v1/download-domains/{id}", s.adminRole(s.adminDomainUpdate, "super_admin", "tech_admin"))
+	m.HandleFunc("GET /admin/v1/platforms", s.adminRole(s.adminPlatforms, "super_admin", "tech_admin", "operator"))
+	m.HandleFunc("PATCH /admin/v1/platforms/{platform}", s.adminRole(s.adminPlatformUpdate, "super_admin", "tech_admin", "operator"))
+	m.HandleFunc("GET /admin/v1/admin-users", s.adminRole(s.adminUsers, "super_admin"))
+	m.HandleFunc("POST /admin/v1/admin-users", s.adminRole(s.adminUserCreate, "super_admin"))
+	m.HandleFunc("PATCH /admin/v1/admin-users/{id}", s.adminRole(s.adminUserUpdate, "super_admin"))
+	m.HandleFunc("GET /admin/v1/config", s.adminRole(s.adminConfig, "super_admin", "tech_admin", "operator"))
+	m.HandleFunc("GET /admin/v1/config/{key}/versions", s.adminRole(s.adminConfigHistory, "super_admin", "tech_admin", "operator"))
+	m.HandleFunc("PATCH /admin/v1/config", s.adminRole(s.adminConfigUpdate, "super_admin", "tech_admin", "operator"))
+	m.HandleFunc("GET /admin/v1/overview", s.withAdmin(func(w http.ResponseWriter, r *http.Request, a auth.Admin, _ string) { s.adminOverview(w, r, a) }))
+	m.HandleFunc("GET /admin/v1/failures", s.adminRole(s.adminFailures, "super_admin", "tech_admin"))
+	m.HandleFunc("GET /admin", s.adminGuard(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin/", http.StatusPermanentRedirect)
+	}))
+	m.HandleFunc("GET /admin/", s.adminGuard(admin.SPA().ServeHTTP))
+	m.HandleFunc("GET /admin/v1/", s.adminGuard(func(w http.ResponseWriter, _ *http.Request) { fail(w, 404, "RESOURCE_NOT_FOUND") }))
 	m.HandleFunc("DELETE /admin/v1/sessions/current", s.withAdmin(func(w http.ResponseWriter, r *http.Request, _ auth.Admin, token string) {
 		if err := s.Admin.Revoke(r.Context(), token); err != nil {
 			fail(w, 503, "SERVICE_BUSY")

@@ -147,25 +147,25 @@ func (s *Mock) createPersistentParse(w http.ResponseWriter, r *http.Request, c c
 	}
 	var active int64
 	err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM parse_job WHERE user_id=? AND status IN ('QUEUED','RUNNING') AND deadline_at>UTC_TIMESTAMP(3)", c.User).Scan(&active)
-	if err != nil || active >= s.Settings.Int("user_active_parse_jobs") {
+	if err != nil || active >= s.settings().Int("user_active_parse_jobs") {
 		fail(w, 503, "SERVICE_BUSY")
 		return
 	}
 	s.mu.Lock()
-	allowed := s.minute("parse:"+c.User, s.Settings.Int("user_parse_per_minute"))
+	allowed := s.minute("parse:"+c.User, s.settings().Int("user_parse_per_minute"))
 	s.mu.Unlock()
 	if !allowed {
 		fail(w, 429, "RATE_LIMITED")
 		return
 	}
 	now := time.Now().UTC()
-	j := job{ID: auth.ID(), User: c.User, Platform: platform, Status: "QUEUED", FlowID: req.FlowID, Created: now, Deadline: now.Add(s.Settings.Seconds("parse_job_timeout_seconds")), Expires: now.Add(s.Settings.Seconds("result_ttl_seconds"))}
+	j := job{ID: auth.ID(), User: c.User, Platform: platform, Status: "QUEUED", FlowID: req.FlowID, Created: now, Deadline: now.Add(s.settings().Seconds("parse_job_timeout_seconds")), Expires: now.Add(s.settings().Seconds("result_ttl_seconds"))}
 	enc, err := s.sealTask(j.ID, "source", selected)
 	if err == nil {
 		_, err = tx.ExecContext(ctx, "INSERT INTO parse_job(id,user_id,flow_id,platform,status,source_hash,source_url_enc,source_expires_at,adapter_version,deadline_at,expires_at,force_refresh) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", j.ID, j.User, j.FlowID, j.Platform, j.Status, auth.Digest(s.Sessions.Key, selected), enc, j.Expires, s.adapterVersion(), j.Deadline, j.Expires, req.ForceRefresh)
 	}
 	if err == nil {
-		_, err = tx.ExecContext(ctx, "INSERT INTO idempotency_record(id,user_id,operation,key_value,payload_hash,object_type,object_id,expires_at) VALUES (?,?,'parse',?,?,'parse_job',?,?)", auth.ID(), c.User, key, digest, j.ID, now.Add(s.Settings.Seconds("idempotency_ttl_seconds")))
+		_, err = tx.ExecContext(ctx, "INSERT INTO idempotency_record(id,user_id,operation,key_value,payload_hash,object_type,object_id,expires_at) VALUES (?,?,'parse',?,?,'parse_job',?,?)", auth.ID(), c.User, key, digest, j.ID, now.Add(s.settings().Seconds("idempotency_ttl_seconds")))
 	}
 	if err == nil {
 		err = tx.Commit()
@@ -227,7 +227,7 @@ func (s *Mock) claimParse(ctx context.Context, owner string) (*persistentParse, 
 		return nil, err
 	}
 	p.Claim++
-	_, err = tx.ExecContext(ctx, "UPDATE parse_job SET status='RUNNING',lease_owner=?,lease_expires_at=?,claim_seq=?,version=version+1,started_at=UTC_TIMESTAMP(3),attempt=attempt+1 WHERE id=?", owner, minTime(p.Job.Deadline, time.Now().Add(s.Settings.Seconds("parser_call_timeout_seconds"))), p.Claim, p.Job.ID)
+	_, err = tx.ExecContext(ctx, "UPDATE parse_job SET status='RUNNING',lease_owner=?,lease_expires_at=?,claim_seq=?,version=version+1,started_at=UTC_TIMESTAMP(3),attempt=attempt+1 WHERE id=?", owner, minTime(p.Job.Deadline, time.Now().Add(s.settings().Seconds("parser_call_timeout_seconds"))), p.Claim, p.Job.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +235,7 @@ func (s *Mock) claimParse(ctx context.Context, owner string) (*persistentParse, 
 }
 
 func (s *Mock) finishParse(ctx context.Context, p *persistentParse, parsed *parse.Result, parseErr error) error {
-	ctx, cancel := context.WithDeadline(ctx, minTime(p.Job.Deadline, time.Now().Add(s.Settings.Seconds("parser_call_timeout_seconds"))))
+	ctx, cancel := context.WithDeadline(ctx, minTime(p.Job.Deadline, time.Now().Add(s.settings().Seconds("parser_call_timeout_seconds"))))
 	defer cancel()
 	for {
 		err := s.finishParseOnce(ctx, p, parsed, parseErr)
@@ -245,7 +245,7 @@ func (s *Mock) finishParse(ctx context.Context, p *persistentParse, parsed *pars
 		}
 		// Retry only the rolled-back database publication, never the parser.
 		// The job/lease fence is checked again on every attempt.
-		timer := time.NewTimer(time.Duration(s.Settings.Int("poll_interval_ms")) * time.Millisecond)
+		timer := time.NewTimer(time.Duration(s.settings().Int("poll_interval_ms")) * time.Millisecond)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -281,11 +281,32 @@ func (s *Mock) finishParseOnce(ctx context.Context, p *persistentParse, parsed *
 	if parseErr != nil {
 		code = parseError(parseErr)
 	}
+	if code == "" && s.ManagedConfig {
+		platform, e := readManagedPlatform(tx.QueryRowContext(ctx, platformSelect+" WHERE platform=? FOR SHARE", p.Job.Platform))
+		if e != nil {
+			return e
+		}
+		code = mediaCapabilityError(platform.policy(), asset{Kind: parsed.MediaType, Role: "content"})
+		if u, err := url.Parse(p.Source); code == "" && (err != nil || !platform.allowsSource(u)) {
+			code = string(parse.Forbidden)
+		}
+		view := *parsed
+		if !platform.Capabilities.CoverEnabled {
+			view.Cover = nil
+		}
+		if !platform.Capabilities.TextEnabled {
+			view.Title, view.Description = nil, nil
+		}
+		parsed = &view
+	}
 	if !time.Now().Before(deadline) {
 		code = "PARSE_TIMEOUT"
 	}
 	if code != "" {
-		_, err = tx.ExecContext(ctx, "UPDATE parse_job SET status='FAILED',error_code=?,finished_at=UTC_TIMESTAMP(3),version=version+1 WHERE id=?", code, p.Job.ID)
+		_, err = tx.ExecContext(ctx, "UPDATE parse_job SET status='FAILED',error_code=?,finished_at=UTC_TIMESTAMP(3),metrics_recorded=TRUE,version=version+1 WHERE id=?", code, p.Job.ID)
+		if err == nil {
+			err = observe(ctx, tx, observation{User: p.Job.User, Trace: p.Job.ID, Platform: p.Job.Platform, Adapter: s.adapterVersion(), Stage: "parse", Outcome: "failed", Code: code, Started: p.Job.Created})
+		}
 		if err != nil {
 			return err
 		}
@@ -317,7 +338,10 @@ func (s *Mock) finishParseOnce(ctx context.Context, p *persistentParse, parsed *
 			return err
 		}
 	}
-	_, err = tx.ExecContext(ctx, "UPDATE parse_job SET status='SUCCEEDED',result_id=?,finished_at=UTC_TIMESTAMP(3),version=version+1 WHERE id=?", resID, p.Job.ID)
+	_, err = tx.ExecContext(ctx, "UPDATE parse_job SET status='SUCCEEDED',result_id=?,finished_at=UTC_TIMESTAMP(3),metrics_recorded=TRUE,version=version+1 WHERE id=?", resID, p.Job.ID)
+	if err == nil {
+		err = observe(ctx, tx, observation{User: p.Job.User, Trace: p.Job.ID, Platform: p.Job.Platform, Adapter: s.adapterVersion(), Stage: "parse", Outcome: "succeeded", Started: p.Job.Created})
+	}
 	if err != nil {
 		return err
 	}
@@ -327,19 +351,19 @@ func (s *Mock) finishParseOnce(ctx context.Context, p *persistentParse, parsed *
 // RunPersistentParse starts a fixed number of workers; jobs remain queued in
 // MySQL until a worker claims them. Restart recovery uses expired leases.
 func (s *Mock) RunPersistentParse(ctx context.Context) {
-	for i := int64(0); i < s.Settings.Int("parser_workers"); i++ {
+	for i := int64(0); i < s.settings().Int("parser_workers"); i++ {
 		go s.parseWorker(ctx, auth.ID())
 	}
 }
 func (s *Mock) parseWorker(ctx context.Context, owner string) {
-	interval := time.Duration(s.Settings.Int("poll_interval_ms")) * time.Millisecond
+	interval := time.Duration(s.settings().Int("poll_interval_ms")) * time.Millisecond
 	for ctx.Err() == nil {
 		p, err := s.claimParse(ctx, owner)
 		if err == nil {
 			call, cancel := context.WithDeadline(ctx, p.Job.Deadline)
 			stopped := make(chan struct{})
 			go func() {
-				ticker := time.NewTicker(s.Settings.Seconds("parser_call_timeout_seconds") / 2)
+				ticker := time.NewTicker(s.settings().Seconds("parser_call_timeout_seconds") / 2)
 				defer ticker.Stop()
 				for {
 					select {
@@ -348,7 +372,7 @@ func (s *Mock) parseWorker(ctx context.Context, owner string) {
 					case <-call.Done():
 						return
 					case <-ticker.C:
-						r, e := s.Sessions.DB.ExecContext(call, "UPDATE parse_job SET lease_expires_at=LEAST(deadline_at,?),version=version+1 WHERE id=? AND status='RUNNING' AND claim_seq=? AND lease_owner=? AND cancel_requested=FALSE AND lease_expires_at>UTC_TIMESTAMP(3)", time.Now().Add(s.Settings.Seconds("parser_call_timeout_seconds")), p.Job.ID, p.Claim, owner)
+						r, e := s.Sessions.DB.ExecContext(call, "UPDATE parse_job SET lease_expires_at=LEAST(deadline_at,?),version=version+1 WHERE id=? AND status='RUNNING' AND claim_seq=? AND lease_owner=? AND cancel_requested=FALSE AND lease_expires_at>UTC_TIMESTAMP(3)", time.Now().Add(s.settings().Seconds("parser_call_timeout_seconds")), p.Job.ID, p.Claim, owner)
 						if e != nil {
 							cancel()
 							return
@@ -361,7 +385,11 @@ func (s *Mock) parseWorker(ctx context.Context, owner string) {
 					}
 				}
 			}()
-			parsed, e := s.parseCache.resolve(call, p.SourceHash, p.Refresh, func() (*parse.Result, error) { return s.callParser(call, p.Source) })
+			cacheKey, e := s.platformCacheKey(call, p.Job.Platform, p.Source, p.SourceHash)
+			var parsed *parse.Result
+			if e == nil {
+				parsed, e = s.parseCache.resolve(call, cacheKey, p.Refresh, func() (*parse.Result, error) { return s.callParser(call, p.Source) })
+			}
 			close(stopped)
 			if ctx.Err() == nil {
 				if err := s.finishParse(ctx, p, parsed, e); err != nil {

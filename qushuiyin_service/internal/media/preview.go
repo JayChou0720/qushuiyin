@@ -25,7 +25,7 @@ type PreviewStream struct {
 // A preview is a bounded range, never a prepared download or a source URL outlet.
 func (r *Relay) VideoPreview(ctx context.Context, platform string, a parse.Asset, header string, head bool, reserve func(int64) int64) (PreviewStream, error) {
 	var out PreviewStream
-	limits := r.Settings.Limits()
+	limits := r.settings().Limits()
 	o := (Probe{Client: r.Client, Limits: limits, Domains: r.Domains, Policy: "relay_only"}).Inspect(ctx, platform, a)
 	if o.FinalURL == "" || o.Type != "video/mp4" || o.Size == nil || *o.Size <= 0 {
 		return out, errors.New("FORMAT_UNSUPPORTED")

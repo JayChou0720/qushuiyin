@@ -51,7 +51,7 @@ func (s *Mock) createBatch(w http.ResponseWriter, r *http.Request, c credential)
 	if !s.read(w, r, &req) {
 		return
 	}
-	if len(req.AssetIDs) == 0 || int64(len(req.AssetIDs)) > s.Settings.Int("max_image_batch_count") || req.ClientActionID == "" || len(req.ClientActionID) > 64 || req.FlowID == "" || len(req.FlowID) > 64 {
+	if len(req.AssetIDs) == 0 || int64(len(req.AssetIDs)) > s.settings().Int("max_image_batch_count") || req.ClientActionID == "" || len(req.ClientActionID) > 64 || req.FlowID == "" || len(req.FlowID) > 64 {
 		fail(w, 400, "BAD_REQUEST")
 		return
 	}
@@ -81,12 +81,12 @@ func (s *Mock) createBatch(w http.ResponseWriter, r *http.Request, c credential)
 		fail(w, 404, "RESOURCE_NOT_FOUND")
 		return
 	}
-	required := s.Settings.Seconds("batch_prepare_timeout_seconds") + s.Settings.Seconds("client_download_timeout_seconds") + s.Settings.Seconds("ticket_safety_margin_seconds")
+	required := s.settings().Seconds("batch_prepare_timeout_seconds") + s.settings().Seconds("client_download_timeout_seconds") + s.settings().Seconds("ticket_safety_margin_seconds")
 	if res.ExpiresAt.Sub(now) < required {
 		fail(w, 410, "RESULT_EXPIRED")
 		return
 	}
-	if !s.Persistent && int64(len(state.batches)) >= s.Settings.Int("memory_mock_max_entries") {
+	if !s.Persistent && int64(len(state.batches)) >= s.settings().Int("memory_mock_max_entries") {
 		fail(w, 503, "SERVICE_BUSY")
 		return
 	}
@@ -99,7 +99,7 @@ func (s *Mock) createBatch(w http.ResponseWriter, r *http.Request, c credential)
 		fail(w, 409, "IDEMPOTENCY_CONFLICT")
 		return
 	}
-	if active >= s.Settings.Int("user_active_save_batches") {
+	if active >= s.settings().Int("user_active_save_batches") {
 		fail(w, 503, "SERVICE_BUSY")
 		return
 	}
@@ -110,7 +110,7 @@ func (s *Mock) createBatch(w http.ResponseWriter, r *http.Request, c credential)
 	if res.Cover != nil {
 		pool[res.Cover.ID] = *res.Cover
 	}
-	b := &batch{ID: auth.ID(), User: c.User, ResultID: res.ID, ClientActionID: req.ClientActionID, FlowID: req.FlowID, Status: "PREPARING", ExpiresAt: minTime(res.ExpiresAt, now.Add(s.Settings.Seconds("batch_ttl_seconds")))}
+	b := &batch{ID: auth.ID(), User: c.User, ResultID: res.ID, ClientActionID: req.ClientActionID, FlowID: req.FlowID, Status: "PREPARING", ExpiresAt: minTime(res.ExpiresAt, now.Add(s.settings().Seconds("batch_ttl_seconds")))}
 	for _, id := range req.AssetIDs {
 		a, ok := pool[id]
 		if !ok {
@@ -122,7 +122,7 @@ func (s *Mock) createBatch(w http.ResponseWriter, r *http.Request, c credential)
 			fail(w, 400, "BAD_REQUEST")
 			return
 		}
-		b.Items = append(b.Items, item{ID: auth.ID(), Asset: a, Status: "PREPARING", Attempt: 1, Deadline: minTime(b.ExpiresAt, now.Add(s.Settings.Seconds("batch_prepare_timeout_seconds")))})
+		b.Items = append(b.Items, item{ID: auth.ID(), Asset: a, Status: "PREPARING", Attempt: 1, Deadline: minTime(b.ExpiresAt, now.Add(s.settings().Seconds("batch_prepare_timeout_seconds")))})
 	}
 	sort.Slice(b.Items, func(i, j int) bool { return b.Items[i].Asset.Order < b.Items[j].Asset.Order })
 	state.batches[b.ID] = b
@@ -145,7 +145,7 @@ type batchAcceptance struct {
 }
 
 func (s *Mock) batchAcceptance(b *batch) batchAcceptance {
-	return batchAcceptance{b.ID, b.Status, s.Settings.Int("poll_interval_ms"), b.ExpiresAt}
+	return batchAcceptance{b.ID, b.Status, s.settings().Int("poll_interval_ms"), b.ExpiresAt}
 }
 
 func (s *Mock) batchAccepted(w http.ResponseWriter, b *batch) {
@@ -225,7 +225,7 @@ func (s *Mock) tickets(w http.ResponseWriter, r *http.Request, c credential) {
 	if !s.read(w, r, &req) {
 		return
 	}
-	if len(req.ItemIDs) == 0 || int64(len(req.ItemIDs)) > s.Settings.Int("max_image_batch_count") {
+	if len(req.ItemIDs) == 0 || int64(len(req.ItemIDs)) > s.settings().Int("max_image_batch_count") {
 		fail(w, 400, "BAD_REQUEST")
 		return
 	}
@@ -288,7 +288,7 @@ func (s *Mock) tickets(w http.ResponseWriter, r *http.Request, c credential) {
 			expires = minTime(expires, authorizationExpiry)
 		}
 		if x.Mode == "relay" {
-			expires = minTime(expires, now.Add(s.Settings.Seconds("media_ticket_ttl_seconds")))
+			expires = minTime(expires, now.Add(s.settings().Seconds("media_ticket_ttl_seconds")))
 		}
 		expires = expires.UTC().Truncate(time.Second)
 		if expires.Sub(now) < s.downloadBudget() {

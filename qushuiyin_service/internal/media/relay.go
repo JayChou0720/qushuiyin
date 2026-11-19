@@ -38,6 +38,7 @@ type Relay struct {
 	DB                 *sql.DB
 	Client             outbound.Client
 	Settings           config.Values
+	CurrentSettings    func() config.Values
 	Key                []byte
 	Directory, FFprobe string
 	mu                 sync.Mutex
@@ -51,6 +52,13 @@ type Relay struct {
 	usageRevision      uint64
 	used, reserved     int64
 	imageSlots         chan struct{}
+}
+
+func (r *Relay) settings() config.Values {
+	if r.CurrentSettings != nil {
+		return r.CurrentSettings()
+	}
+	return r.Settings
 }
 
 type FileIdentity struct {
@@ -70,18 +78,20 @@ func (r *Relay) shareKey(id FileIdentity, version string, a parse.Asset) string 
 
 // Only this module chooses paths. The identity comes from the authorized result.
 func (r *Relay) Prepare(ctx context.Context, id FileIdentity, version string, a parse.Asset) (Prepared, error) {
-	ctx, cancel := context.WithTimeout(ctx, r.Settings.Seconds("media_fetch_timeout_seconds"))
+	settings := r.settings()
+	ctx, cancel := context.WithTimeout(ctx, settings.Seconds("media_fetch_timeout_seconds"))
 	defer cancel()
-	return r.prepare(ctx, ctx, id, version, a, false)
+	return r.prepare(ctx, ctx, id, version, a, false, settings)
 }
 
 func (r *Relay) PrepareThumbnail(ctx, queued context.Context, id FileIdentity, version string, a parse.Asset) (Prepared, error) {
-	edge := strconv.FormatInt(r.Settings.Int("thumbnail_max_edge_px"), 10)
-	quality := strconv.FormatInt(r.Settings.Int("thumbnail_jpeg_quality"), 10)
-	return r.prepare(ctx, queued, id, "thumb-"+edge+"-"+quality+"-"+version, a, true)
+	settings := r.settings()
+	edge := strconv.FormatInt(settings.Int("thumbnail_max_edge_px"), 10)
+	quality := strconv.FormatInt(settings.Int("thumbnail_jpeg_quality"), 10)
+	return r.prepare(ctx, queued, id, "thumb-"+edge+"-"+quality+"-"+version, a, true, settings)
 }
 
-func (r *Relay) prepare(ctx, queued context.Context, id FileIdentity, version string, a parse.Asset, thumbnail bool) (Prepared, error) {
+func (r *Relay) prepare(ctx, queued context.Context, id FileIdentity, version string, a parse.Asset, thumbnail bool, settings config.Values) (Prepared, error) {
 	if id.ContentID == "" && (id.UserID == "" || id.ResultID == "" || id.AssetID == "") {
 		return Prepared{}, errors.New("missing private media identity")
 	}
@@ -114,7 +124,7 @@ func (r *Relay) prepare(ctx, queued context.Context, id FileIdentity, version st
 		remaining := time.Until(queueDeadline)
 		imageWait = &remaining
 	}
-	ctx, cancel := context.WithTimeout(ctx, r.Settings.Seconds("media_fetch_timeout_seconds"))
+	ctx, cancel := context.WithTimeout(ctx, settings.Seconds("media_fetch_timeout_seconds"))
 	defer cancel()
 	var existing Prepared
 	err := r.DB.QueryRowContext(ctx, "SELECT id,storage_key,mime_type,size_bytes,sha256,converted,expires_at FROM media_file WHERE share_key=? AND output_version=? AND status='ready' AND expires_at>UTC_TIMESTAMP(3)", share, version).Scan(&existing.ID, &existing.StorageKey, &existing.MIME, &existing.Size, &existing.Hash, &existing.Converted, &existing.Expires)
@@ -127,8 +137,8 @@ func (r *Relay) prepare(ctx, queued context.Context, id FileIdentity, version st
 				if e = r.DB.QueryRowContext(ctx, "SELECT ready_at FROM media_file WHERE id=?", existing.ID).Scan(&ready); e != nil {
 					return Prepared{}, e
 				}
-				until := time.Now().Add(r.Settings.Seconds("media_cache_ttl_seconds"))
-				maximum := ready.Add(r.Settings.Seconds("shared_media_max_age_seconds"))
+				until := time.Now().Add(settings.Seconds("media_cache_ttl_seconds"))
+				maximum := ready.Add(settings.Seconds("shared_media_max_age_seconds"))
 				if until.After(maximum) {
 					until = maximum
 				}
@@ -145,7 +155,7 @@ func (r *Relay) prepare(ctx, queued context.Context, id FileIdentity, version st
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return Prepared{}, err
 	}
-	release, err := r.reserve(ctx, a.Kind)
+	release, err := r.reserve(ctx, mediaSizeLimit(settings, a.Kind))
 	if err != nil {
 		return Prepared{}, err
 	}
@@ -159,7 +169,7 @@ func (r *Relay) prepare(ctx, queued context.Context, id FileIdentity, version st
 	sources := append([]string{a.Source}, a.Alternates...)
 	var last error
 	for i, source := range sources {
-		if int64(i) >= r.Settings.Int("max_media_candidates") {
+		if int64(i) >= settings.Int("max_media_candidates") {
 			break
 		}
 		storageKey := auth.ID() + ".media"
@@ -167,7 +177,7 @@ func (r *Relay) prepare(ctx, queued context.Context, id FileIdentity, version st
 		if e != nil {
 			return Prepared{}, e
 		}
-		file, e := r.fetchOutputTo(ctx, source, a.Kind, storageKey, thumbnail, imageWait)
+		file, e := r.fetchOutputTo(ctx, source, a.Kind, storageKey, thumbnail, imageWait, settings)
 		if e != nil {
 			hold()
 			if errors.Is(e, errAnimatedWebP) {
@@ -179,7 +189,7 @@ func (r *Relay) prepare(ctx, queued context.Context, id FileIdentity, version st
 		releaseFile = hold
 		now := time.Now().UTC()
 		file.ID = auth.ID()
-		file.Expires = now.Add(r.Settings.Seconds("media_cache_ttl_seconds"))
+		file.Expires = now.Add(settings.Seconds("media_cache_ttl_seconds"))
 		// Expired cache rows lose their sharing key; immutable old files can still
 		// be retained until their active authorizations and transfers have ended.
 		tx, e := r.DB.BeginTx(ctx, nil)
@@ -237,17 +247,24 @@ func (r *Relay) fetch(ctx context.Context, source, kind string) (Prepared, error
 }
 
 func (r *Relay) fetchOutput(ctx context.Context, source, kind string, thumbnail bool) (Prepared, error) {
-	return r.fetchOutputTo(ctx, source, kind, auth.ID()+".media", thumbnail, nil)
+	return r.fetchOutputTo(ctx, source, kind, auth.ID()+".media", thumbnail, nil, r.settings())
 }
 
-func (r *Relay) relaySizeError(kind string, size int64) error {
-	if kind == "video" && size <= r.Settings.Int("max_video_bytes") {
+func mediaSizeLimit(settings config.Values, kind string) int64 {
+	if kind == "video" {
+		return settings.Int("relay_max_video_bytes")
+	}
+	return settings.Int("max_image_bytes")
+}
+
+func relaySizeError(settings config.Values, kind string, size int64) error {
+	if kind == "video" && size <= settings.Int("max_video_bytes") {
 		return errors.New("DIRECT_DOWNLOAD_UNAVAILABLE")
 	}
 	return errors.New("FILE_TOO_LARGE")
 }
 
-func (r *Relay) fetchOutputTo(ctx context.Context, source, kind, key string, thumbnail bool, imageWait *time.Duration) (Prepared, error) {
+func (r *Relay) fetchOutputTo(ctx context.Context, source, kind, key string, thumbnail bool, imageWait *time.Duration, settings config.Values) (Prepared, error) {
 	var out Prepared
 	resp, err := r.Client.Headers(ctx, source, http.MethodGet, "", func(u *url.URL) bool { return outbound.HTTPS(u) })
 	if err != nil {
@@ -260,12 +277,9 @@ func (r *Relay) fetchOutputTo(ctx context.Context, source, kind, key string, thu
 		}
 		return out, errors.New("media source unavailable")
 	}
-	limit := r.Settings.Int("max_image_bytes")
-	if kind == "video" {
-		limit = r.Settings.Int("relay_max_video_bytes")
-	}
+	limit := mediaSizeLimit(settings, kind)
 	if limit <= 0 || resp.ContentLength > limit {
-		return out, r.relaySizeError(kind, resp.ContentLength)
+		return out, relaySizeError(settings, kind, resp.ContentLength)
 	}
 	if err = os.MkdirAll(r.Directory, 0700); err != nil {
 		return out, err
@@ -285,7 +299,7 @@ func (r *Relay) fetchOutputTo(ctx context.Context, source, kind, key string, thu
 		return out, errors.New("MEDIA_INVALID")
 	}
 	if n > limit {
-		return out, r.relaySizeError(kind, max(n, resp.ContentLength))
+		return out, relaySizeError(settings, kind, max(n, resp.ContentLength))
 	}
 	if resp.ContentLength >= 0 && resp.ContentLength != n {
 		return out, errors.New("incomplete media")
@@ -307,7 +321,7 @@ func (r *Relay) fetchOutputTo(ctx context.Context, source, kind, key string, thu
 			return out, err
 		}
 	} else {
-		actual, err = r.processImage(ctx, part, actual, thumbnail, imageWait)
+		actual, err = r.processImage(ctx, part, actual, thumbnail, imageWait, settings)
 		if err != nil {
 			return out, err
 		}
@@ -414,16 +428,12 @@ func (r *Relay) refreshUsage(ctx context.Context, force bool) error {
 }
 
 func (r *Relay) calibrateUsage(ctx context.Context) error {
-	check, cancel := context.WithTimeout(ctx, r.Settings.Seconds("database_operation_timeout_seconds"))
+	check, cancel := context.WithTimeout(ctx, r.settings().Seconds("database_operation_timeout_seconds"))
 	defer cancel()
 	return r.refreshUsage(check, true)
 }
 
-func (r *Relay) reserve(ctx context.Context, kind string) (func(), error) {
-	limit := r.Settings.Int("max_image_bytes")
-	if kind == "video" {
-		limit = r.Settings.Int("relay_max_video_bytes")
-	}
+func (r *Relay) reserve(ctx context.Context, limit int64) (func(), error) {
 	for {
 		if err := r.refreshUsage(ctx, false); err != nil {
 			return nil, err
@@ -435,7 +445,7 @@ func (r *Relay) reserve(ctx context.Context, kind string) (func(), error) {
 		r.mu.Unlock()
 	}
 	defer r.mu.Unlock()
-	if limit <= 0 || limit > r.Settings.Int("media_cache_budget_bytes")-r.used-r.reserved {
+	if limit <= 0 || limit > r.settings().Int("media_cache_budget_bytes")-r.used-r.reserved {
 		return nil, errors.New("SERVICE_BUSY")
 	}
 	r.reserved += limit
@@ -457,7 +467,7 @@ func (r *Relay) validateVideo(ctx context.Context, path string) error {
 	// Local files only. Explicit protocol restrictions keep malformed containers
 	// from making ffprobe fetch remote playlists or secondary resources.
 	cmd := exec.CommandContext(ctx, r.FFprobe, "-v", "error", "-protocol_whitelist", "file,pipe", "-show_entries", "format=format_name:stream=codec_type,codec_name", "-of", "json", path)
-	output := &limitedProbeOutput{limit: int(r.Settings.Int("ffprobe_max_output_bytes"))}
+	output := &limitedProbeOutput{limit: int(r.settings().Int("ffprobe_max_output_bytes"))}
 	cmd.Stdout = output
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {

@@ -71,7 +71,7 @@ func (r *Relay) finishRemoval(key string) {
 }
 
 func (r *Relay) Clean(ctx context.Context) {
-	ticker := time.NewTicker(r.Settings.Seconds("media_gc_interval_seconds"))
+	ticker := time.NewTicker(r.settings().Seconds("media_gc_interval_seconds"))
 	defer ticker.Stop()
 	for {
 		r.CleanOnce(ctx)
@@ -86,7 +86,7 @@ func (r *Relay) CleanOnce(ctx context.Context) {
 	if err := r.calibrateUsage(ctx); err != nil {
 		return
 	}
-	limit := int(r.Settings.Int("cleanup_batch_size"))
+	limit := int(r.settings().Int("cleanup_batch_size"))
 	if limit <= 0 {
 		return
 	}
@@ -116,7 +116,7 @@ func (r *Relay) CleanOnce(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	before := time.Now().Add(-r.Settings.Seconds("media_fetch_timeout_seconds") - r.Settings.Seconds("lease_cleanup_grace_seconds"))
+	before := time.Now().Add(-r.settings().Seconds("media_fetch_timeout_seconds") - r.settings().Seconds("lease_cleanup_grace_seconds"))
 	var candidates []string
 	for _, f := range files {
 		if !f.Type().IsRegular() {

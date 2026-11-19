@@ -46,6 +46,23 @@ func newUpstreamGuard(policy config.Upstream) *upstreamGuard {
 	return &upstreamGuard{policy: policy, now: time.Now, platforms: make(map[string]*upstreamState)}
 }
 
+func (a Adapter) CircuitState(platform string) string {
+	if a.guard == nil {
+		return "unavailable"
+	}
+	g := a.guard
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	state := g.platforms[platform]
+	if state == nil || state.openUntil.IsZero() {
+		return "closed"
+	}
+	if g.now().Before(state.openUntil) {
+		return "open"
+	}
+	return "half_open"
+}
+
 func (g *upstreamGuard) begin(platform string) (*upstreamPermit, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

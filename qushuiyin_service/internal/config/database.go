@@ -36,6 +36,7 @@ func Load(ctx context.Context, db *sql.DB) (Values, error) {
 }
 func (v Values) Int(key string) int64             { var n int64; _ = json.Unmarshal(v.Data[key], &n); return n }
 func (v Values) Bool(key string) bool             { var b bool; _ = json.Unmarshal(v.Data[key], &b); return b }
+func (v Values) Text(key string) string           { var s string; _ = json.Unmarshal(v.Data[key], &s); return s }
 func (v Values) Seconds(key string) time.Duration { return time.Duration(v.Int(key)) * time.Second }
 func (v Values) Validate(positiveKeys ...string) error {
 	for _, k := range positiveKeys {

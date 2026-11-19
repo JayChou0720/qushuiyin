@@ -25,7 +25,7 @@ func (s *Mock) deleteData(w http.ResponseWriter, r *http.Request, c credential) 
 		return
 	}
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	deadline := now.Add(time.Duration(s.Settings.Int("cleanup_completion_hours")) * time.Hour)
+	deadline := now.Add(time.Duration(s.settings().Int("cleanup_completion_hours")) * time.Hour)
 	_, err = tx.ExecContext(ctx, "UPDATE app_user SET status='deleted',deleted_at=?,subject_hash=NULL WHERE id=?", now, c.User)
 	if err == nil {
 		_, err = tx.ExecContext(ctx, "UPDATE app_session SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL", now, c.User)
@@ -35,6 +35,9 @@ func (s *Mock) deleteData(w http.ResponseWriter, r *http.Request, c credential) 
 	}
 	if err == nil {
 		_, err = tx.ExecContext(ctx, "DELETE FROM event_ingest WHERE user_id=?", c.User)
+	}
+	if err == nil {
+		_, err = tx.ExecContext(ctx, "DELETE FROM operation_sample WHERE user_id=?", c.User)
 	}
 	if err == nil {
 		_, err = tx.ExecContext(ctx, "INSERT INTO cleanup_job(id,user_id,kind,status,deadline_at) VALUES (?,?,'user_data','PENDING',?)", auth.ID(), c.User, deadline)
@@ -94,6 +97,7 @@ var cleanupUserQueries = []string{
 	"DELETE FROM parse_job WHERE user_id=?",
 	"DELETE FROM feedback WHERE user_id=?",
 	"DELETE FROM event_ingest WHERE user_id=?",
+	"DELETE FROM operation_sample WHERE user_id=?",
 	"DELETE FROM idempotency_record WHERE user_id=?",
 	"DELETE FROM app_session WHERE user_id=?",
 	"DELETE FROM usage_counter WHERE subject_key=?",
@@ -113,10 +117,8 @@ func (s *Mock) runCleanup(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	for _, query := range cleanupUserQueries {
-		if _, err = tx.ExecContext(ctx, query, user); err != nil {
-			return err
-		}
+	if err = purgeUserRows(ctx, tx, user); err != nil {
+		return err
 	}
 	if _, err = tx.ExecContext(ctx, "UPDATE cleanup_job SET status='SUCCEEDED',attempt=attempt+1,last_error_code=NULL WHERE id=?", id); err != nil {
 		return err
@@ -124,14 +126,23 @@ func (s *Mock) runCleanup(ctx context.Context, id string) error {
 	return tx.Commit()
 }
 
+func purgeUserRows(ctx context.Context, tx *sql.Tx, user string) error {
+	for _, query := range cleanupUserQueries {
+		if _, err := tx.ExecContext(ctx, query, user); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Mock) cleanDatabase(ctx context.Context, now time.Time) {
 	if s.Sessions.DB == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, s.Settings.Seconds("database_operation_timeout_seconds"))
+	ctx, cancel := context.WithTimeout(ctx, s.settings().Seconds("database_operation_timeout_seconds"))
 	defer cancel()
 	db := s.Sessions.DB
-	limit := s.Settings.Int("cleanup_batch_size")
+	limit := s.settings().Int("cleanup_batch_size")
 	if s.Persistent {
 		// Keep opaque IDs for explicit expiry/idempotency responses, but erase
 		// source signatures and content as soon as their short retention ends.
@@ -184,12 +195,14 @@ func (s *Mock) cleanDatabase(ctx context.Context, now time.Time) {
 	}
 	for _, q := range []struct {
 		query  string
-		cutoff time.Time
+		cutoff any
 	}{
 		{"DELETE FROM feedback WHERE expires_at<=? ORDER BY expires_at LIMIT ?", now},
-		{"DELETE FROM event_ingest WHERE received_at<=? ORDER BY received_at LIMIT ?", now.AddDate(0, 0, -int(s.Settings.Int("diagnostic_retention_days")))},
+		{"DELETE FROM event_ingest WHERE received_at<=? ORDER BY received_at LIMIT ?", now.AddDate(0, 0, -int(s.settings().Int("diagnostic_retention_days")))},
+		{"DELETE FROM operation_sample WHERE created_at<=? ORDER BY created_at LIMIT ?", now.AddDate(0, 0, -int(s.settings().Int("diagnostic_retention_days")))},
 		{"DELETE FROM idempotency_record WHERE expires_at<=? ORDER BY expires_at LIMIT ?", now},
-		{"DELETE FROM admin_audit WHERE created_at<=? ORDER BY created_at LIMIT ?", now.AddDate(0, 0, -int(s.Settings.Int("admin_audit_retention_days")))},
+		{"DELETE FROM admin_audit WHERE created_at<=? ORDER BY created_at LIMIT ?", now.AddDate(0, 0, -int(s.settings().Int("admin_audit_retention_days")))},
+		{"DELETE FROM daily_metric WHERE stat_date<? ORDER BY stat_date LIMIT ?", dayStart(now).In(shanghaiDay).AddDate(0, 0, 1-int(s.settings().Int("aggregate_metric_retention_days"))).Format("2006-01-02")},
 	} {
 		if _, err = db.ExecContext(ctx, q.query, q.cutoff, limit); err != nil {
 			slog.Warn("local data retention sweep failed")

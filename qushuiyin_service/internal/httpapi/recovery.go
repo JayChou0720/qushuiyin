@@ -28,7 +28,7 @@ func (b *batch) aggregate() {
 	}
 }
 func (s *Mock) downloadBudget() time.Duration {
-	return s.Settings.Seconds("client_download_timeout_seconds") + s.Settings.Seconds("ticket_safety_margin_seconds")
+	return s.settings().Seconds("client_download_timeout_seconds") + s.settings().Seconds("ticket_safety_margin_seconds")
 }
 func (s *Mock) refreshBatch(b *batch, now time.Time) {
 	for i := range b.Items {
@@ -66,14 +66,14 @@ func (s *Mock) prepare(b *batch, x *item, now time.Time) {
 	x.ObjectID = auth.ID()
 	if scenario == "10006" && x.Fallback {
 		x.Status, x.Mode, x.Failure, x.CopyAvailable = "FAILED", "", "DIRECT_DOWNLOAD_UNAVAILABLE", true
-		x.AvailableUntil = minTime(b.ExpiresAt, now.Add(s.Settings.Seconds("direct_url_assumed_ttl_seconds")))
+		x.AvailableUntil = minTime(b.ExpiresAt, now.Add(s.settings().Seconds("direct_url_assumed_ttl_seconds")))
 		return
 	}
 	x.Status, x.Mode = "READY", "relay"
-	ttl := s.Settings.Seconds("media_cache_ttl_seconds")
+	ttl := s.settings().Seconds("media_cache_ttl_seconds")
 	if (scenario == "10005" || scenario == "10006") && !x.Fallback {
 		x.Mode = "direct"
-		ttl = s.Settings.Seconds("direct_url_assumed_ttl_seconds")
+		ttl = s.settings().Seconds("direct_url_assumed_ttl_seconds")
 	}
 	x.AvailableUntil = minTime(b.ExpiresAt, now.Add(ttl))
 }
@@ -84,7 +84,7 @@ func (s *Mock) canPrepare(w http.ResponseWriter, r *http.Request, b *batch, now 
 		fail(w, 503, "SERVICE_BUSY")
 		return false
 	}
-	budget := s.Settings.Seconds("batch_prepare_timeout_seconds") + s.downloadBudget()
+	budget := s.settings().Seconds("batch_prepare_timeout_seconds") + s.downloadBudget()
 	if expires.Sub(now) < budget {
 		fail(w, 410, "RESULT_EXPIRED")
 		return false
@@ -95,7 +95,7 @@ func (s *Mock) canPrepare(w http.ResponseWriter, r *http.Request, b *batch, now 
 	}
 	if b.Status != "PREPARING" {
 		n, _, err := s.batchCapacity(r.Context(), b.User, "", now)
-		if err != nil || n >= s.Settings.Int("user_active_save_batches") {
+		if err != nil || n >= s.settings().Int("user_active_save_batches") {
 			fail(w, 503, "SERVICE_BUSY")
 			return false
 		}
@@ -108,14 +108,14 @@ func (s *Mock) requeue(b *batch, x *item, now time.Time) {
 	x.DirectURL, x.FileID, x.MIME, x.Hash = "", "", "", ""
 	x.Converted = false
 	x.Size = 0
-	x.Deadline = minTime(b.ExpiresAt, now.Add(s.Settings.Seconds("batch_prepare_timeout_seconds")))
+	x.Deadline = minTime(b.ExpiresAt, now.Add(s.settings().Seconds("batch_prepare_timeout_seconds")))
 }
 func (s *Mock) retryBatch(w http.ResponseWriter, r *http.Request, c credential) {
 	var req struct{ ItemIDs []string }
 	if !s.read(w, r, &req) {
 		return
 	}
-	if len(req.ItemIDs) == 0 || int64(len(req.ItemIDs)) > s.Settings.Int("max_image_batch_count") {
+	if len(req.ItemIDs) == 0 || int64(len(req.ItemIDs)) > s.settings().Int("max_image_batch_count") {
 		fail(w, 400, "BAD_REQUEST")
 		return
 	}
@@ -163,7 +163,7 @@ func (s *Mock) retryBatch(w http.ResponseWriter, r *http.Request, c credential) 
 			fail(w, 409, "FILE_NOT_READY")
 			return
 		}
-		if x.Attempt >= s.Settings.Int("media_prepare_max_attempts_per_item") {
+		if x.Attempt >= s.settings().Int("media_prepare_max_attempts_per_item") {
 			fail(w, 409, "RETRY_LIMIT_REACHED")
 			return
 		}

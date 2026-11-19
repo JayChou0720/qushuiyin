@@ -53,6 +53,8 @@ func adminHash(password []byte) string {
 	enc := base64.RawStdEncoding
 	return adminHashPrefix + enc.EncodeToString(salt) + "$" + enc.EncodeToString(adminPasswordKey(password, salt))
 }
+
+func HashAdminPassword(password []byte) string { return adminHash(password) }
 func checkAdminHash(password []byte, hash string) bool {
 	suffix, valid := strings.CutPrefix(hash, adminHashPrefix)
 	a, b, split := strings.Cut(suffix, "$")

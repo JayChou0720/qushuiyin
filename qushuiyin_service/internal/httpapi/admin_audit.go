@@ -14,7 +14,7 @@ func (s *Mock) adminAuditList(w http.ResponseWriter, r *http.Request, _ auth.Adm
 		return
 	}
 	query := "SELECT a.id,a.operator_id,a.action,a.target_type,a.target_id,a.before_redacted,a.after_redacted,a.reason,a.request_id,a.created_at FROM admin_audit a WHERE a.created_at>?"
-	args := []any{time.Now().UTC().AddDate(0, 0, -int(s.Settings.Int("admin_audit_retention_days")))}
+	args := []any{time.Now().UTC().AddDate(0, 0, -int(s.settings().Int("admin_audit_retention_days")))}
 	for _, filter := range []struct{ param, column string }{{"targetType", "a.target_type"}, {"targetId", "a.target_id"}, {"action", "a.action"}} {
 		value := r.URL.Query().Get(filter.param)
 		if value == "" {

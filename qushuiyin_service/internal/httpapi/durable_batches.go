@@ -115,7 +115,7 @@ func (s *Mock) batchURLRate(user string) bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 	}
-	return s.minute("ticket:"+user, s.Settings.Int("user_download_url_requests_per_minute"))
+	return s.minute("ticket:"+user, s.settings().Int("user_download_url_requests_per_minute"))
 }
 
 func (s *Mock) batchCopyRate(user string) bool {
@@ -123,7 +123,7 @@ func (s *Mock) batchCopyRate(user string) bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 	}
-	return s.rateUntil("copy:"+user, s.Settings.Int("user_copy_link_per_day"), dayStart(time.Now()).AddDate(0, 0, 1))
+	return s.rateUntil("copy:"+user, s.settings().Int("user_copy_link_per_day"), dayStart(time.Now()).AddDate(0, 0, 1))
 }
 
 func (s *Mock) authorizedBatch(next authed) http.HandlerFunc {
@@ -310,7 +310,7 @@ func (s *Mock) batchCapacity(ctx context.Context, user, action string, now time.
 }
 
 func (s *Mock) persistentEventOwner(e clientEvent, user string, now time.Time) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), s.Settings.Seconds("database_operation_timeout_seconds"))
+	ctx, cancel := context.WithTimeout(context.Background(), s.settings().Seconds("database_operation_timeout_seconds"))
 	defer cancel()
 	var resultID sql.NullString
 	if e.JobID != nil {
@@ -405,7 +405,7 @@ func (s *Mock) saveBatchRequest(ctx context.Context, c credential, state batchRe
 		return err
 	}
 	s.mu.Lock()
-	deliveryLog(windows, s.hostWindows, s.Settings)
+	deliveryLog(windows, s.hostWindows, s.settings())
 	for host, window := range windows {
 		s.hostWindows[host] = window
 	}
@@ -459,12 +459,12 @@ func (s *Mock) writeBatch(ctx context.Context, tx *sql.Tx, b *batch, items []ite
 // A batch item is a durable work unit. A worker only publishes while its
 // sequence and lease still match, so a late process cannot replace new work.
 func (s *Mock) RunPersistentMedia(ctx context.Context) {
-	for i := int64(0); i < s.Settings.Int("media_workers"); i++ {
+	for i := int64(0); i < s.settings().Int("media_workers"); i++ {
 		go s.mediaWorker(ctx, auth.ID())
 	}
 }
 func (s *Mock) mediaWorker(ctx context.Context, owner string) {
-	interval := time.Duration(s.Settings.Int("poll_interval_ms")) * time.Millisecond
+	interval := time.Duration(s.settings().Int("poll_interval_ms")) * time.Millisecond
 	for ctx.Err() == nil {
 		worked, err := s.preparePersistentItem(ctx, owner)
 		if worked && err == nil {
@@ -508,7 +508,7 @@ func (s *Mock) preparePersistentItem(ctx context.Context, owner string) (bool, e
 		return false, errors.New("missing batch item")
 	}
 	deadline := minTime(x.Deadline, b.ExpiresAt)
-	lease := s.Settings.Seconds("media_fetch_timeout_seconds")
+	lease := s.settings().Seconds("media_fetch_timeout_seconds")
 	leaseExpires := minTime(deadline, time.Now().Add(lease)).Truncate(time.Millisecond)
 	seq++
 	_, err = tx.ExecContext(ctx, "UPDATE save_batch_item SET lease_owner=?,lease_expires_at=?,claim_seq=?,prepare_status='PREPARING',version=version+1 WHERE id=?", owner, leaseExpires, seq, iid)
@@ -518,12 +518,13 @@ func (s *Mock) preparePersistentItem(ctx context.Context, owner string) (bool, e
 	if err = tx.Commit(); err != nil {
 		return false, err
 	}
-	if !time.Now().Before(deadline) {
-		return true, s.publishPersistentItem(ctx, owner, seq, b, *x)
+	started := time.Now()
+	if !started.Before(deadline) {
+		return true, s.publishPersistentItem(ctx, owner, seq, b, *x, started)
 	}
 	call, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	retry := time.Duration(s.Settings.Int("poll_interval_ms")) * time.Millisecond
+	retry := time.Duration(s.settings().Int("poll_interval_ms")) * time.Millisecond
 	go func() {
 		if !keepMediaLease(call, leaseExpires, deadline, lease, retry, func(ctx context.Context, next time.Time) (int64, error) {
 			result, err := s.Sessions.DB.ExecContext(ctx, `UPDATE save_batch_item SET lease_expires_at=?,version=version+1
@@ -539,8 +540,21 @@ func (s *Mock) preparePersistentItem(ctx context.Context, owner string) (bool, e
 	res, err := s.loadPersistentResult(call, user, b.ResultID)
 	if err == nil {
 		if s.Relay == nil {
-			local := Mock{Settings: s.Settings, results: map[string]*result{res.ID: res.result}}
-			local.prepare(b, x, time.Now().UTC())
+			local := Mock{Settings: s.settings(), results: map[string]*result{res.ID: res.result}}
+			policy, err := s.managedPolicy(call, res.Value.Platform)
+			code := ""
+			if s.ManagedConfig {
+				if err != nil {
+					code = "SERVICE_BUSY"
+				} else {
+					code = mediaCapabilityError(policy, x.Asset)
+				}
+			}
+			if code != "" {
+				x.Status, x.Failure = "FAILED", code
+			} else {
+				local.prepare(b, x, time.Now().UTC())
+			}
 		} else {
 			s.prepareDelivery(call, b, x, res)
 		}
@@ -548,7 +562,7 @@ func (s *Mock) preparePersistentItem(ctx context.Context, owner string) (bool, e
 	if call.Err() == context.Canceled || err != nil && call.Err() != context.DeadlineExceeded {
 		return true, err
 	}
-	return true, s.publishPersistentItem(ctx, owner, seq, b, *x)
+	return true, s.publishPersistentItem(ctx, owner, seq, b, *x, started)
 }
 
 func (s *Mock) acquireMediaWork(ctx context.Context) (func(), error) {
@@ -604,7 +618,7 @@ func keepMediaLease(ctx context.Context, expires, deadline time.Time, lease, pol
 	}
 }
 
-func (s *Mock) publishPersistentItem(ctx context.Context, owner string, seq uint64, b *batch, x item) error {
+func (s *Mock) publishPersistentItem(ctx context.Context, owner string, seq uint64, b *batch, x item, started time.Time) error {
 	tx, err := s.Sessions.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -661,6 +675,29 @@ func (s *Mock) publishPersistentItem(ctx context.Context, owner string, seq uint
 		if err != nil {
 			return err
 		}
+	}
+	var platform string
+	if err = tx.QueryRowContext(ctx, "SELECT platform FROM parse_result WHERE id=? AND user_id=?", latest.ResultID, latest.User).Scan(&platform); err != nil {
+		return err
+	}
+	mode := x.Mode
+	if x.CopyAvailable {
+		mode = "copy"
+	}
+	outcome := "succeeded"
+	if x.Status != "READY" {
+		outcome = "failed"
+	}
+	stage := "media_prepare"
+	if x.Attempt > 1 {
+		stage = "media_retry"
+	}
+	kind := x.Asset.Kind
+	if x.Asset.Role == "cover" {
+		kind = "cover"
+	}
+	if err = observe(ctx, tx, observation{User: b.User, Trace: b.ID, Platform: platform, Adapter: s.adapterVersion(), Stage: stage, Outcome: outcome, Source: kind, Mode: mode, Code: x.Failure, Started: started}); err != nil {
+		return err
 	}
 	*old = x
 	latest.aggregate()

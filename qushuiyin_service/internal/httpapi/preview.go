@@ -28,7 +28,7 @@ func (s *Mock) previewTickets(w http.ResponseWriter, r *http.Request, c credenti
 	if !s.read(w, r, &req) {
 		return
 	}
-	if len(req.AssetIDs) == 0 || int64(len(req.AssetIDs)) > s.Settings.Int("max_image_batch_count") {
+	if len(req.AssetIDs) == 0 || int64(len(req.AssetIDs)) > s.settings().Int("max_image_batch_count") {
 		fail(w, 400, "BAD_REQUEST")
 		return
 	}
@@ -71,19 +71,19 @@ func (s *Mock) previewTickets(w http.ResponseWriter, r *http.Request, c credenti
 		delete(pool, id)
 		chosen = append(chosen, a)
 	}
-	if !s.minute("ticket:"+c.User, s.Settings.Int("user_download_url_requests_per_minute")) {
+	if !s.minute("ticket:"+c.User, s.settings().Int("user_download_url_requests_per_minute")) {
 		fail(w, 429, "RATE_LIMITED")
 		return
 	}
-	if int64(len(s.previews)+len(chosen)) > s.Settings.Int("memory_media_ticket_max_entries") {
+	if int64(len(s.previews)+len(chosen)) > s.settings().Int("memory_media_ticket_max_entries") {
 		fail(w, 503, "SERVICE_BUSY")
 		return
 	}
-	expires := minTime(res.ExpiresAt, now.Add(s.Settings.Seconds("media_ticket_ttl_seconds")))
+	expires := minTime(res.ExpiresAt, now.Add(s.settings().Seconds("media_ticket_ttl_seconds")))
 	entries := make([]dto, 0, len(chosen))
 	for _, a := range chosen {
 		id := auth.ID()
-		limit := s.Settings.Int("preview_max_bytes")
+		limit := s.settings().Int("preview_max_bytes")
 		_, data := fixture.File(a.Kind)
 		if int64(len(data)) > limit {
 			entries = append(entries, dto{"assetId": a.ID, "mode": "relay", "url": nil, "expiresAt": nil, "reasonCode": "MEDIA_TOO_LARGE"})

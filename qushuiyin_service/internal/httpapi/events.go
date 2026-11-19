@@ -61,7 +61,7 @@ func (s *Mock) validateEvent(raw json.RawMessage, now time.Time) (clientEvent, s
 			return e, "BAD_REQUEST"
 		}
 	}
-	window := time.Duration(s.Settings.Int("client_event_retention_hours")) * time.Hour
+	window := time.Duration(s.settings().Int("client_event_retention_hours")) * time.Hour
 	if e.ClientTime.Before(now.Add(-window)) || e.ClientTime.After(now.Add(window)) {
 		return e, "BAD_REQUEST"
 	}
@@ -97,7 +97,7 @@ func (s *Mock) ingestEvents(w http.ResponseWriter, r *http.Request, c credential
 	if !s.read(w, r, &request) {
 		return
 	}
-	if len(request.Events) == 0 || int64(len(request.Events)) > s.Settings.Int("event_batch_max") {
+	if len(request.Events) == 0 || int64(len(request.Events)) > s.settings().Int("event_batch_max") {
 		fail(w, 400, "BAD_REQUEST")
 		return
 	}

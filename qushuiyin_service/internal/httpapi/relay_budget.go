@@ -44,7 +44,7 @@ func (s *Mock) reserveMediaBytes(ctx context.Context, user, key string, expires 
 	}
 	b := s.byteBudgets[key]
 	if b == nil {
-		if int64(len(s.byteBudgets)) >= s.Settings.Int("memory_media_ticket_max_entries") {
+		if int64(len(s.byteBudgets)) >= s.settings().Int("memory_media_ticket_max_entries") {
 			s.mu.Unlock()
 			return 0, nil, errors.New("SERVICE_BUSY")
 		}
@@ -86,7 +86,7 @@ func (s *Mock) acquireMedia(user, ticket string) (func(), bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	keys := []string{"global", "user:" + user, "ticket:" + ticket}
-	limits := []int64{s.Settings.Int("global_media_connections"), s.Settings.Int("user_media_connections"), s.Settings.Int("ticket_connections")}
+	limits := []int64{s.settings().Int("global_media_connections"), s.settings().Int("user_media_connections"), s.settings().Int("ticket_connections")}
 	for i, key := range keys {
 		if s.mediaConnections[key] >= limits[i] {
 			return nil, false
@@ -114,7 +114,7 @@ func (s *Mock) reserveEgress(ctx context.Context, user string, size int64, parti
 	}
 	defer tx.Rollback()
 	subjects := []string{"global", user}
-	limits := []int64{s.Settings.Int("global_media_egress_per_day_bytes"), s.Settings.Int("user_media_egress_per_day_bytes")}
+	limits := []int64{s.settings().Int("global_media_egress_per_day_bytes"), s.settings().Int("user_media_egress_per_day_bytes")}
 	for i, subject := range subjects {
 		_, err = tx.ExecContext(ctx, "INSERT INTO usage_counter(id,subject_key,stat_date,kind,value) VALUES (?,?,?,'media_egress',0) ON DUPLICATE KEY UPDATE value=value", auth.ID(), subject, day)
 		if err != nil {
@@ -142,7 +142,7 @@ func (s *Mock) reserveEgress(ctx context.Context, user string, size int64, parti
 		return 0, nil, err
 	}
 	return size, func(actual int64) {
-		settle, cancel := context.WithTimeout(context.Background(), s.Settings.Seconds("database_operation_timeout_seconds"))
+		settle, cancel := context.WithTimeout(context.Background(), s.settings().Seconds("database_operation_timeout_seconds"))
 		defer cancel()
 		// Failure leaves a conservative full reservation; it cannot overspend quota.
 		_, _ = s.Sessions.DB.ExecContext(settle, "UPDATE usage_counter SET value=GREATEST(0,value-?) WHERE subject_key IN (?,?) AND stat_date=? AND kind='media_egress'", size-actual, "global", user, day)
@@ -151,12 +151,25 @@ func (s *Mock) reserveEgress(ctx context.Context, user string, size int64, parti
 
 type countedMediaResponse struct {
 	http.ResponseWriter
-	sent int64
+	sent        int64
+	status      int
+	writeFailed bool
+}
+
+func (w *countedMediaResponse) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
 }
 
 func (w *countedMediaResponse) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
 	n, e := w.ResponseWriter.Write(p)
 	w.sent += int64(n)
+	w.writeFailed = w.writeFailed || e != nil || n != len(p)
 	return n, e
 }
 func (w *countedMediaResponse) Unwrap() http.ResponseWriter { return w.ResponseWriter }

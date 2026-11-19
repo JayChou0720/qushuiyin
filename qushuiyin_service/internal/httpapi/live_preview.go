@@ -23,7 +23,7 @@ func (s *Mock) livePreviewTickets(w http.ResponseWriter, r *http.Request, c cred
 	if !s.read(w, r, &req) {
 		return
 	}
-	if len(req.AssetIDs) == 0 || int64(len(req.AssetIDs)) > s.Settings.Int("max_image_batch_count") {
+	if len(req.AssetIDs) == 0 || int64(len(req.AssetIDs)) > s.settings().Int("max_image_batch_count") {
 		fail(w, 400, "BAD_REQUEST")
 		return
 	}
@@ -47,7 +47,7 @@ func (s *Mock) livePreviewTickets(w http.ResponseWriter, r *http.Request, c cred
 		seen[id] = true
 	}
 	s.mu.Lock()
-	allowed := s.minute("ticket:"+c.User, s.Settings.Int("user_download_url_requests_per_minute"))
+	allowed := s.minute("ticket:"+c.User, s.settings().Int("user_download_url_requests_per_minute"))
 	s.mu.Unlock()
 	if !allowed {
 		fail(w, 429, "RATE_LIMITED")
@@ -63,8 +63,8 @@ func (s *Mock) livePreviewTickets(w http.ResponseWriter, r *http.Request, c cred
 			entries = append(entries, entry)
 			continue
 		}
-		expires := minTime(res.ExpiresAt, now.Add(s.Settings.Seconds("media_ticket_ttl_seconds")))
-		if s.Settings.Bool("direct_preview_enabled") && policy == "direct_preferred" {
+		expires := minTime(res.ExpiresAt, now.Add(s.settings().Seconds("media_ticket_ttl_seconds")))
+		if s.settings().Bool("direct_preview_enabled") && policy == "direct_preferred" {
 			d := s.Relay.Decide(r.Context(), res.Value.Platform, policy, *a, false)
 			if d.Mode == "direct" {
 				entry["mode"], entry["url"], entry["expiresAt"] = "direct", d.URL, minTime(expires, d.Expires)
@@ -95,7 +95,7 @@ func (s *Mock) livePreviewTickets(w http.ResponseWriter, r *http.Request, c cred
 				delete(s.previews, key)
 			}
 		}
-		full := int64(len(s.previews)) >= s.Settings.Int("memory_media_ticket_max_entries")
+		full := int64(len(s.previews)) >= s.settings().Int("memory_media_ticket_max_entries")
 		if !full {
 			s.previews[id] = p
 		}
@@ -178,12 +178,14 @@ func (s *Mock) livePreviewMedia(w http.ResponseWriter, r *http.Request, purpose 
 		return
 	}
 	defer release()
-	ctx, cancel := context.WithTimeout(r.Context(), s.Settings.Seconds("client_download_timeout_seconds"))
+	ctx, cancel := context.WithTimeout(r.Context(), s.settings().Seconds("client_download_timeout_seconds"))
 	defer cancel()
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(s.Settings.Seconds("client_download_timeout_seconds")))
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(s.settings().Seconds("client_download_timeout_seconds")))
 	counted := &countedMediaResponse{ResponseWriter: w}
+	started := time.Now()
+	transfer := observation{User: p.user, Trace: res.ID, Platform: res.Value.Platform, Adapter: s.adapterVersion(), Stage: purpose, Mode: "relay", Started: started}
 	if purpose == "preview" {
-		limit := s.Settings.Int("preview_max_bytes")
+		limit := s.settings().Int("preview_max_bytes")
 		key := purpose + ":" + id
 		var settle func(int64)
 		defer func() {
@@ -225,6 +227,7 @@ func (s *Mock) livePreviewMedia(w http.ResponseWriter, r *http.Request, purpose 
 		w.WriteHeader(stream.Status)
 		if r.Method != "HEAD" {
 			_, _ = io.Copy(counted, stream.Body)
+			s.reportTransfer(transfer, counted)
 		}
 		return
 	}
@@ -254,12 +257,12 @@ func (s *Mock) livePreviewMedia(w http.ResponseWriter, r *http.Request, purpose 
 		if r.Header.Get("If-Range") != "" {
 			n = prepared.Size
 		}
-		settle, err := s.reservePreviewBytes(ctx, p.user, purpose+":"+id, p.expires, n, prepared.Size*s.Settings.Int("ticket_byte_budget_multiplier"))
+		settle, err := s.reservePreviewBytes(ctx, p.user, purpose+":"+id, p.expires, n, prepared.Size*s.settings().Int("ticket_byte_budget_multiplier"))
 		if err != nil {
 			fail(w, 429, "RATE_LIMITED")
 			return
 		}
-		defer func() { settle(counted.sent) }()
+		defer func() { settle(counted.sent); s.reportTransfer(transfer, counted) }()
 	}
 	w.Header().Set("Content-Type", prepared.MIME)
 	w.Header().Set("Cache-Control", "no-store")
@@ -271,7 +274,7 @@ func (s *Mock) prepareImagePreview(ctx context.Context, purpose string, identity
 	queued := ctx
 	if purpose == "thumbnail" {
 		var cancel context.CancelFunc
-		queued, cancel = context.WithTimeout(ctx, s.Settings.Seconds("thumbnail_generate_timeout_seconds"))
+		queued, cancel = context.WithTimeout(ctx, s.settings().Seconds("thumbnail_generate_timeout_seconds"))
 		defer cancel()
 	}
 	release, err := s.acquireMediaWork(queued)

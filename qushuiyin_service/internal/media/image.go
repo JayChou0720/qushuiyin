@@ -13,12 +13,13 @@ import (
 
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
+	"qushuiyin/service/internal/config"
 )
 
 func (r *Relay) imageWork(ctx context.Context) (func(), error) {
 	r.mu.Lock()
 	if r.imageSlots == nil {
-		n := r.Settings.Int("image_convert_workers")
+		n := r.settings().Int("image_convert_workers")
 		if n <= 0 {
 			r.mu.Unlock()
 			return nil, errors.New("SERVICE_BUSY")
@@ -39,7 +40,7 @@ func (r *Relay) imageWork(ctx context.Context) (func(), error) {
 	}
 }
 
-func (r *Relay) processImage(ctx context.Context, f *os.File, mime string, thumbnail bool, imageWait *time.Duration) (string, error) {
+func (r *Relay) processImage(ctx context.Context, f *os.File, mime string, thumbnail bool, imageWait *time.Duration, settings config.Values) (string, error) {
 	if mime != "image/jpeg" && mime != "image/png" && mime != "image/webp" {
 		return "", errors.New("FORMAT_UNSUPPORTED")
 	}
@@ -60,7 +61,7 @@ func (r *Relay) processImage(ctx context.Context, f *os.File, mime string, thumb
 	defer release()
 	alpha := false
 	if mime == "image/webp" {
-		alpha, err = inspectWebP(ctx, f, r.Settings.Int("max_image_pixels"))
+		alpha, err = inspectWebP(ctx, f, settings.Int("max_image_pixels"))
 		if err != nil {
 			return "", err
 		}
@@ -72,7 +73,7 @@ func (r *Relay) processImage(ctx context.Context, f *os.File, mime string, thumb
 	if err != nil {
 		return "", errors.New("FORMAT_UNSUPPORTED")
 	}
-	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width) > r.Settings.Int("max_image_pixels")/int64(cfg.Height) {
+	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width) > settings.Int("max_image_pixels")/int64(cfg.Height) {
 		return "", errors.New("FORMAT_UNSUPPORTED")
 	}
 	if _, err = f.Seek(0, io.SeekStart); err != nil {
@@ -91,12 +92,12 @@ func (r *Relay) processImage(ctx context.Context, f *os.File, mime string, thumb
 	if !thumbnail && mime != "image/webp" {
 		return mime, nil
 	}
-	quality := r.Settings.Int("thumbnail_jpeg_quality")
+	quality := settings.Int("thumbnail_jpeg_quality")
 	if quality < 1 || quality > 100 {
 		return "", errors.New("SERVICE_BUSY")
 	}
 	if thumbnail {
-		edge := r.Settings.Int("thumbnail_max_edge_px")
+		edge := settings.Int("thumbnail_max_edge_px")
 		if edge <= 0 {
 			return "", errors.New("SERVICE_BUSY")
 		}
@@ -125,7 +126,7 @@ func (r *Relay) processImage(ctx context.Context, f *os.File, mime string, thumb
 	if _, err = f.Seek(0, io.SeekStart); err != nil {
 		return "", err
 	}
-	w := &boundedImageWriter{w: f, left: r.Settings.Int("max_image_bytes"), ctx: ctx}
+	w := &boundedImageWriter{w: f, left: settings.Int("max_image_bytes"), ctx: ctx}
 	if alpha && !thumbnail {
 		return "image/png", png.Encode(w, img)
 	}
